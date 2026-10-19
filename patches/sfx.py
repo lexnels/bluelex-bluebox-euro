@@ -1,5 +1,6 @@
-"""Send FX: a Juno-style chorus, a warm drive and a second delay, each with its own on/off, reached by pressing FX
-after the delay and the reverb, fed by per-channel track sends on a third track screen page.
+"""Send FX: a Juno-style chorus and a warm drive as per-track inserts (each track's On and Amount on a third track
+screen page), and a second delay (Rev Delay) fed by per-track sends there; their settings are reached by pressing FX
+after the delay and the reverb.
 
 M7 code is src/sfx_m7.c (cave out/sfx7), M4 code is in src/dly_m4.c (out/dly4). Needs the hall patchset (its reverb
 list loop is where the new params join the reverb slot's set) and the delay patchset (dly4 cave, param definitions).
