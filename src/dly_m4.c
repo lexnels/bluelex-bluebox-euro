@@ -53,8 +53,6 @@ void dly_defs(void *table, unsigned id, unsigned type, const char *label, int mi
     /* per track: chorus and drive inserts, the Rev Delay send (type 8 0..1000 like FX1 0xda) */
     fw_def(table, SFX_TS_CHO, KNOB, "Chorus:", 0, 1000, "chorus_amount");
     fw_def(table, SFX_TS_DRV, KNOB, "Drive:", 0, 1000, "drive_amount");
-    fw_def(table, SFX_TS_CHO_ON, TOGGLE, "Chorus:", 0, 1, "chorus_track_on");
-    fw_def(table, SFX_TS_DRV_ON, TOGGLE, "Drive:", 0, 1, "drive_track_on");
     fw_def(table, SFX_TS_D2, KNOB, "FX5:", 0, 1000, "delay2_send");
     sfx_reset();                    /* at boot the FX button starts from the reverb itself */
 }
@@ -143,8 +141,7 @@ struct sfx_ui {
     uint32_t magic;
     uint32_t mode;                  /* the FX button: 0 reverb, 1 chorus, 2 drive, 3 delay 2 */
     uint32_t tpage;                 /* the track screen's page (seen by ts_tp_setup) */
-    uint16_t toggles;               /* the track screen's CUE and SIDE CHAIN buttons are our Chorus and Drive */
-    uint16_t _rows[3];              /* (unused) */
+    uint16_t _rows[4];              /* (unused) */
     uint32_t page3;                 /* the track screen shows our sends (between it and the sidechain screen) */
 };
 #define SU ((volatile struct sfx_ui *)0x38800fe0u)    /* own 32-byte line, M4 only */
@@ -158,10 +155,8 @@ static void su_write(uint32_t mode)
     (void)RCC_AHB4ENR_M4;
     PWR_CR1_M4 |= 1u << 8;
     SU->mode = mode;
-    if (SU->magic != SU_MAGIC) {
+    if (SU->magic != SU_MAGIC)
         SU->page3 = 0;
-        SU->toggles = 0;
-    }
     SU->magic = SU_MAGIC;
 }
 static uint32_t su_mode(void)
@@ -174,7 +169,6 @@ static void sfx_reset(void)
 {
     su_write(0);
     SU->page3 = 0;
-    SU->toggles = 0;                /* (the track screen is built anew, with its own buttons) */
 }
 
 /* the panel order: knobs fill columns of 2, encoders take 4 at a time */
@@ -273,15 +267,15 @@ void sfx_from_reverb(void *app, unsigned view, int a, int b)
 }
 
 /*
- * Per track: Chorus and Drive (inserts: on/off and amount) and the Rev Delay send (FX5). Each channel's set
- * (FUN_0812060c case 1) gets these five params, so they are kept, saved with the project and sent to the M7 with
+ * Per track: Chorus and Drive (inserts: their amount, off at 0) and the Rev Delay send (FX5). Each channel's set
+ * (FUN_0812060c case 1) gets these three params, so they are kept, saved with the project and sent to the M7 with
  * the channel's slot like FX1/FX2 (src/sfx_m7.c).
  *
  * The track screen (page app+0xcfb70, views 5 and 6 = its two halves, FUN_08133884 picks one, FUN_081339b0 fills
  * its knobs for the selected track) has Vol, Pan, Gain on the first half, FX1, FX2, OUT3, OUT4 (and CUE) on the
  * second. The track button goes track screen -> sidechain screen (view 0x16); we put a turn between: the second
- * half again, with Chorus and Drive amounts and FX5 in place of FX1, FX2, OUT3, the CUE and SIDE CHAIN buttons as
- * Chorus and Drive on, and Vol, Pan, Gain, the CUE knob and OUT4 hidden.
+ * half again, with Chorus and Drive amounts and FX5 in place of FX1, FX2, OUT3, and Vol, Pan, Gain and CUE
+ * hidden.
  */
 void ts_set_add(void *set, unsigned id, int value)    /* the channel set's last add (bl @0x08120888, id 0x173) */
 {
@@ -289,8 +283,6 @@ void ts_set_add(void *set, unsigned id, int value)    /* the channel set's last 
     fw_add(set, SFX_TS_CHO, 0);
     fw_add(set, SFX_TS_DRV, 0);
     fw_add(set, SFX_TS_D2, 0);
-    fw_add(set, SFX_TS_CHO_ON, 0);
-    fw_add(set, SFX_TS_DRV_ON, 0);
 }
 
 static uint32_t ts_on(void)
@@ -337,9 +329,7 @@ void ts_track_back(void *app, unsigned view, int a, int b)
 #define TP_OUT3 0xda78              /* encoder 2 */
 #define TP_OUT4 0xde48              /* encoder 4 */
 #define TP_CUE 0xd6a8
-#define TP_CUE_BTN 0xe814           /* CUE (0x173), second row: our Chorus on */
-#define TP_SC_BTN 0xe9e8            /* SIDE CHAIN (0x2b, shown inverted), first row: our Drive on */
-#define TP_TRACK(p) (*(uint16_t *)((uint8_t *)(p) + 0xbc9c))   /* the selected track (the fill gives every widget it) */
+#define TP_CUE_BTN 0xe814
 #define FW_STATE ((void *)0x30018010)                  /* the params (the literal FUN_081339b0 uses) */
 typedef void (*tp_setup_fn)(void *page, int sub, int a, int b);
 typedef void (*tp_fill_fn)(void *page, void *slot);
@@ -357,16 +347,7 @@ typedef void (*turn_fn)(void *w, int delta);
 #define fw_knob_info ((knob_info_fn)0x08128fc9)
 #define fw_knob_name ((show_fn)0x081288fd)  /* redraws a knob's name from its text (FUN_081339b0 after OUT3/OUT4's) */
 #define fw_turn ((turn_fn)0x08128d9d)
-typedef void (*tog_set_fn)(void *w, int value);
-typedef void (*label_fn)(void *w, const char *text);
-typedef void (*label2_fn)(void *w, const char *line1, const char *line2);
-#define fw_tog_set ((tog_set_fn)0x081280b5)     /* a button's state from its param's value (+0xfc: inverted) */
-#define fw_tog_info ((knob_info_fn)0x081280cb)
-#define fw_label ((label_fn)0x08139725)         /* a button's label, one line (the track screen's CUE) */
-#define fw_label_split ((label_fn)0x08128051)   /* two lines, split at the space (SIDE CHAIN) */
-#define fw_label2 ((label2_fn)0x081398cd)
-#define STR_CUE ((const char *)0x081495d0)
-#define STR_SIDE_CHAIN ((const char *)0x081496cc)
+
 
 /* hide (1) or show (0) a widget: its vtable slot 0x2c, as the FX panel hides the knobs it has no param for */
 static void ts_vis(void *page, unsigned off, int hide)
@@ -374,59 +355,31 @@ static void ts_vis(void *page, unsigned off, int hide)
     uint8_t *w = TP_KNOB(page, off);
     ((void (*)(void *, int))(*(uint32_t **)w)[0x2c / 4])(w, hide);
 }
-/* on our sends Vol, Pan, Gain, the CUE knob and OUT4 are hidden */
-static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_OUT4 };
+/* on our sends Vol, Pan, Gain and CUE (knob and button) are hidden; OUT4 shows the M7's check (ts_seen) */
+static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_CUE_BTN };
 static void ts_hide(void *page, int hide)
 {
     for (unsigned i = 0; i < sizeof TP_OTHERS / sizeof TP_OTHERS[0]; i++)
         ts_vis(page, TP_OTHERS[i], hide);
 }
 
-static void tbind(void *page, unsigned off, uint16_t slot, unsigned id, int invert, int info_too)
+/* What the M7 has seen since boot (src/sfx_m7.c writes it), shown as OUT4's name on our sends: a letter for each, a
+ * dash for what has not happened. M = our settings reach it, Q = only through the master queue, P = its FX run,
+ * S = the mixer's channels pass through us, I = a track's chorus or drive ran. */
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; };
+#define SEEN ((volatile struct sfx_seen *)0x38800e60u)
+#define SEEN_MAGIC 0x4e454553u
+static void ts_seen(void *page)
 {
-    uint8_t *w = TP_KNOB(page, off);
-    uint16_t sl = slot, pid = (uint16_t)id;
-    int v = 0;
-    uint32_t info[8];
-    for (int i = 0; i < 8; i++)
-        ((volatile uint32_t *)info)[i] = 0;
-    ((uint8_t *)info)[0] = 1;
-    ((uint8_t *)info)[3] = 1;
-    *(uint16_t *)(w + 0xf8) = slot;
-    *(uint16_t *)(w + 0xfa) = (uint16_t)id;     /* what a press sets (FUN_081280f4: event 0x6e, slot, id, state) */
-    w[0xfc] = (uint8_t)invert;
-    fw_getp(FW_STATE, &sl, &pid, &v);
-    fw_tog_set(w, v);
-    if (info_too) {
-        sl = slot;
-        fw_info(FW_STATE, &sl, id, (uint8_t *)info);
-        fw_tog_info(w, (uint8_t *)info);
-    }
-}
-
-/* The CUE and SIDE CHAIN buttons: on our sends Chorus and Drive (on/off, this track), anywhere else back to
- * theirs, as the track screen's constructor and fill set them up */
-static void ts_toggles(void *page, unsigned slot)
-{
-    if (slot >= 12)
-        return;
-    if (ts_on()) {
-        if (!SU->toggles) {
-            fw_label2(TP_KNOB(page, TP_CUE_BTN), "CHORUS", "");
-            fw_label2(TP_KNOB(page, TP_SC_BTN), "DRIVE", "");
-            PWR_CR1_M4 |= 1u << 8;
-            SU->toggles = 1;
-        }
-        tbind(page, TP_CUE_BTN, (uint16_t)slot, SFX_TS_CHO_ON, 0, 1);
-        tbind(page, TP_SC_BTN, (uint16_t)slot, SFX_TS_DRV_ON, 0, 1);
-    } else if (SU->toggles) {
-        fw_label(TP_KNOB(page, TP_CUE_BTN), STR_CUE);
-        fw_label_split(TP_KNOB(page, TP_SC_BTN), STR_SIDE_CHAIN);
-        tbind(page, TP_CUE_BTN, (uint16_t)slot, 0x173, 0, 1);
-        tbind(page, TP_SC_BTN, (uint16_t)slot, 0x2b, 1, 0);
-        PWR_CR1_M4 |= 1u << 8;
-        SU->toggles = 0;
-    }
+    static const char L[5] = { 'M', 'Q', 'P', 'S', 'I' };
+    su_mode();                      /* backup SRAM on */
+    uint32_t bits = SEEN->magic == SEEN_MAGIC ? SEEN->bits : 0;
+    char *name = (char *)TP_KNOB(page, TP_OUT4) + 0xf8;
+    for (int i = 0; i < 5; i++)
+        name[i] = bits >> i & 1 ? L[i] : '-';
+    name[5] = 0;
+    TP_KNOB(page, TP_OUT4)[0x1f7] = 0;
+    fw_knob_name(TP_KNOB(page, TP_OUT4), 1);
 }
 
 /* bl FUN_08133884 @0x08135720 (event 0x8c: the track screen shown, sub = its half): the first half ends our sends */
@@ -439,7 +392,6 @@ void ts_tp_setup(void *page, int sub, int a, int b)
     SU->tpage = (uint32_t)page;
     fw_tp_setup(page, sub, a, b);
     ts_hide(page, sub == 1 && ts_on());     /* (the stock halves show them all again) */
-    ts_toggles(page, TP_TRACK(page));
 }
 
 static void bind(void *page, unsigned off, uint16_t slot, unsigned id)
@@ -464,10 +416,8 @@ void ts_tp_fill(void *page, void *arg)
 {
     fw_tp_fill(page, arg);
     uint16_t slot = *(uint16_t *)((uint8_t *)arg + 4);
-    if (TP_SUB(page) != 1 || !ts_on()) {
-        ts_toggles(page, slot);     /* (back to CUE and SIDE CHAIN, if they were ours) */
+    if (TP_SUB(page) != 1 || !ts_on())
         return;
-    }
     if (slot >= 12)
         return;
     bind(page, TP_FX1, slot, SFX_TS_CHO);       /* Chorus amount */
@@ -478,7 +428,7 @@ void ts_tp_fill(void *page, void *arg)
     name[0] = 'F'; name[1] = 'X'; name[2] = '5'; name[3] = 0;
     TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
     fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
-    ts_toggles(page, slot);
+    ts_seen(page);
     ts_hide(page, 1);
 }
 

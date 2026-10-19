@@ -2,11 +2,11 @@
  * Send FX, M7 side: a Juno-style chorus and a warm drive as per-track inserts, and a second delay (Rev Delay) as a
  * send FX.
  *
- * Chorus and drive: each track has its own On switch and Amount (on the track screen's sends page); their sound
+ * Chorus and drive: each track has its own Chorus and Drive amount (on the track screen's sends page; 0 = off); their sound
  * (Mode, Rate, Depth, Width; Drive, Tone, Level) is set once, on their FX panels. sfx_strip, around the mixer's
  * per-channel call, runs a track's drive and then its chorus on a copy of the track's input and hands the mixer that
  * copy instead, so the track's fader, pan, mute, sends and outputs all come after them. Up to NSLOT tracks at once
- * (the CPU: about 3 % of the M7 per track with both on); a fifth one switched on stays dry until one is switched off.
+ * (the CPU: about 3 % of the M7 per track with both on); a fifth one turned up stays dry until one is back at 0.
  *
  * Rev Delay: the mixer sums the channels into bus 12 and their FX1/FX2 sends into bus 13 (the delay) and bus 14 (the
  * reverb); the graph then runs the reverb, the delay and node 0x30, which adds both returns into bus 12. Each channel
@@ -79,8 +79,7 @@ struct sfx {
     int32_t drv_drive, drv_tone, drv_level;
     int32_t d2_on, d2_fx1, d2_fx2, d2_time, d2_fb, d2_tone, d2_ping, d2_level, d2_beat, d2_sync, d2_rev, d2_drift;
     float bpm;                                                  /* the tempo d2_tgt was worked out for */
-    /* per track: chorus and drive on and amount (0..1), Rev Delay send (0..1) */
-    int32_t tc_on[NCH], td_on[NCH];
+    /* per track: chorus and drive amounts (0..1, off at 0), Rev Delay send (0..1) */
     float tc_amt[NCH], td_amt[NCH], ts_d2[NCH];
     int8_t slot_of[NCH];                                        /* the track's slot, -1 none */
     uint32_t act;                                               /* the Rev Delay runs, so it wants input */
@@ -104,6 +103,35 @@ struct sfx {
 
 struct sfx_ptr { uint32_t magic; struct sfx *s; };
 #define SP ((volatile struct sfx_ptr *)0x38800fa0u)   /* own 32-byte line, M7 only */
+
+/* What the M7 has seen since boot, for the M4 to show on the track sends page (src/dly_m4.c): a check on hardware */
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; };
+#define SEEN ((volatile struct sfx_seen *)0x38800e60u)  /* own 32-byte line (free: dly_shared ends at 0xe5c) */
+#define SEEN_MAGIC 0x4e454553u      /* "SEEN" */
+#define SEEN_MSG   1u               /* one of our messages, through sfx_msg */
+#define SEEN_QUEUE 2u               /* one of ours, from the master queue (sfx_msg missed it) */
+#define SEEN_PROC  4u               /* sfx_process ran */
+#define SEEN_STRIP 8u               /* sfx_strip ran with our state */
+#define SEEN_INS   16u              /* a track's inserts ran */
+#define SCB_DCCMVAC (*(volatile uint32_t *)0xe000ef68u)  /* clean a D-cache line, so the M4 sees it */
+static void seen(uint32_t bit, unsigned ch, unsigned id)
+{
+    if (SEEN->magic == SEEN_MAGIC && (SEEN->bits & bit) == bit && !id)
+        return;
+    PWR_CR1 |= 1u << 8;
+    if (SEEN->magic != SEEN_MAGIC) {
+        SEEN->bits = 0;
+        SEEN->magic = SEEN_MAGIC;
+    }
+    SEEN->bits |= bit;
+    if (id) {
+        SEEN->last_ch = (uint16_t)ch;
+        SEEN->last_id = (uint16_t)id;
+    }
+    __asm__ volatile("dsb");
+    SCB_DCCMVAC = (uint32_t)SEEN;
+    __asm__ volatile("dsb");
+}
 
 static void zero(void *p, uint32_t bytes)
 {
@@ -226,6 +254,7 @@ void *sfx_ctor(void *obj)
     /* the same heap life (a rebuilt graph): keep ours; after a reset the bump pointer is back below it */
     if (!(SP->magic == SFX_MAGIC && a >= 0xc0000000u && a + sizeof(struct sfx) <= HEAP_TOP
           && s->magic == SFX_MAGIC && s->self == s)) {
+        SEEN->magic = 0;            /* a fresh boot: nothing seen yet */
         s = (struct sfx *)fw_alloc(sizeof(struct sfx));
         zero(s, sizeof(struct sfx));
         defaults(s);
@@ -272,7 +301,7 @@ static int set(struct sfx *s, unsigned id, int32_t v)
 /* the per-track ones (each channel's set, the channel as target) */
 static int is_ts(unsigned id)
 {
-    return (id >= SFX_TS_CHO && id <= SFX_TS_D2) || id == SFX_TS_CHO_ON || id == SFX_TS_DRV_ON;
+    return id >= SFX_TS_CHO && id <= SFX_TS_D2;
 }
 static void set_ts(struct sfx *s, unsigned id, unsigned ch, int32_t v)
 {
@@ -283,8 +312,6 @@ static void set_ts(struct sfx *s, unsigned id, unsigned ch, int32_t v)
     case SFX_TS_CHO: s->tc_amt[ch] = a; break;
     case SFX_TS_DRV: s->td_amt[ch] = a; break;
     case SFX_TS_D2: s->ts_d2[ch] = a; break;
-    case SFX_TS_CHO_ON: s->tc_on[ch] = v != 0; break;
-    case SFX_TS_DRV_ON: s->td_on[ch] = v != 0; break;
     }
 }
 
@@ -293,7 +320,7 @@ static void set_ts(struct sfx *s, unsigned id, unsigned ch, int32_t v)
 static void inserts(const struct sfx *s, struct ins *k, const float *il, const float *ir, float *ol, float *or_, unsigned n)
 {
     unsigned c = (unsigned)k->ch;
-    float ct = s->tc_on[c] ? 0.5f * s->tc_amt[c] : 0.f, dt = s->td_on[c] ? s->td_amt[c] : 0.f;
+    float ct = 0.5f * s->tc_amt[c], dt = s->td_amt[c];
     float dg = k->dg, cg = k->cg;
     if (dt > 0.f || dg > 1e-4f) {
         if (dg <= 1e-4f)                                /* starting: from fresh filters */
@@ -361,11 +388,15 @@ static void inserts(const struct sfx *s, struct ins *k, const float *il, const f
     k->cg = cg;
 }
 
-/* the track's slot: kept while it has chorus or drive on or still fading out, taken when one comes on (0 if all
+static int wants(const struct sfx *s, unsigned c)
+{
+    return s->tc_amt[c] > 0.f || s->td_amt[c] > 0.f;
+}
+/* the track's slot: kept while it has chorus or drive up or still fading out, taken when one comes up (0 if all
  * NSLOT are in use) */
 static struct ins *slot(struct sfx *s, unsigned c)
 {
-    int want = s->tc_on[c] || s->td_on[c];
+    int want = wants(s, c);
     int j = s->slot_of[c];
     if (j >= 0) {
         struct ins *k = &s->ins[j];
@@ -516,10 +547,12 @@ void sfx_msg(void *ctx, struct fw_ev *ev)
         if (s) {
             if (is_ts(ev->id) && ev->target < NCH) {
                 set_ts(s, ev->id, ev->target, ev->value);
+                seen(SEEN_MSG, ev->target, ev->id);
                 return;
             }
             if (set(s, ev->id, ev->value)) {
                 s->dirty = 1;
+                seen(SEEN_MSG, ev->target, ev->id);
                 return;
             }
         }
@@ -539,11 +572,17 @@ unsigned sfx_process(void *obj, void *ctx)
     s->dirty = 0;
     for (unsigned i = 0; fw_next_ev(q, i, &ev); i++)
         if (ev.type == 0x39) {
+            int ours = 1;
             if (is_ts(ev.id))
                 set_ts(s, ev.id, ev.target, ev.value);
+            else if (set(s, ev.id, ev.value))
+                changed = 1;
             else
-                changed |= set(s, ev.id, ev.value);
+                ours = 0;
+            if (ours)
+                seen(SEEN_QUEUE, ev.target, ev.id);
         }
+    seen(SEEN_PROC, 0, 0);
     if (s->d2_beat) {               /* the song tempo, as the stock delay reads it (FUN_08053234: ctx[0] + 0x18) */
         float bpm = *(volatile float *)(*(uint8_t **)ctx + 0x18);
         if (!(bpm >= 20.f && bpm <= 400.f)) bpm = 120.f;
@@ -554,7 +593,7 @@ unsigned sfx_process(void *obj, void *ctx)
     /* a slot whose track's strip did not run (the channel switched off) and that it no longer wants: free */
     for (unsigned j = 0; j < NSLOT; j++) {
         struct ins *k = &s->ins[j];
-        if (k->ch >= 0 && !k->seen && !s->tc_on[k->ch] && !s->td_on[k->ch]) {
+        if (k->ch >= 0 && !k->seen && !wants(s, (unsigned)k->ch)) {
             s->slot_of[k->ch] = -1;
             k->ch = -1;
         }
@@ -595,6 +634,7 @@ void sfx_strip(void *mixer, void *in, unsigned idx, float *ch, void *mainb, void
         fw_strip(mixer, in, idx, ch, mainb, ctx);
         return;
     }
+    seen(SEEN_STRIP, 0, 0);
     struct ins *k = slot(s, idx);
     struct bus tb;
     float tl[MAXN], tr[MAXN];
@@ -614,6 +654,7 @@ void sfx_strip(void *mixer, void *in, unsigned idx, float *ch, void *mainb, void
             } else
                 fw_stereo(ib, &il, &ir);    /* (a mono input: its right side made a copy of the left, as stock) */
             inserts(s, k, il, ir, tl, tr, n);
+            seen(SEEN_INS, 0, 0);
             tb.cap = n; tb.frames = n; tb.l = tl; tb.r = tr; tb.silent = 0; tb.stereo = 1;
             in = &tb;
         }

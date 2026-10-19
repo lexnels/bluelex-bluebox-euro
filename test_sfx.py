@@ -128,7 +128,7 @@ def setup():
     stub(uc, 0x0805012C, strips)                 # the stock channel strip: its post-fader bus is ours to fill
     for port in range(19):
         uc.mem_write(BUS(port), struct.pack("<IIIIBBxx", 32, 32, 0x24030000 + port * 0x200, 0x24030100 + port * 0x200, 1, 0))
-    ts_all(uc, 1000)                # channel 0 sent fully to all three, so each FX gets the test signal
+    ts_all(uc, 1000)                # channel 0 sent fully to the Rev Delay, so it gets the test signal
     return uc, node
 def events(uc, evs, target=0x15):
     for i, ev in enumerate(evs):
@@ -136,9 +136,8 @@ def events(uc, evs, target=0x15):
         uc.mem_write(Q + i * 24, struct.pack("<B7xIHHiI", 0x39, ev[2] if len(ev) > 2 else target, pid, 0, val, 0))
     w32(uc, Q + 0x600, len(evs))
 def ts_all(uc, v, ch=0):
-    """channel ch's chorus and drive amounts and Rev Delay send: as the M4 sends them (slot = channel), read with the
-    next block"""
-    pending.extend([(ids["TS_CHO"], v, ch), (ids["TS_DRV"], v, ch), (ids["TS_D2"], v, ch)])
+    """channel ch's Rev Delay send: as the M4 sends it (slot = channel), read with the next block"""
+    pending.append((ids["TS_D2"], v, ch))
 pending = []
 IN = 0x24054000                     # a channel's input bus
 def strip(uc, l, r, silent=False, idx=0, stereo=1):
@@ -193,8 +192,8 @@ def run_ins(uc, node, sig_l, sig_r, evs=(), ch=0, skip=0, stereo=1):
         outl += l; outr += r
         if b >= skip: cost = max(cost, n)
     return outl, outr, cost
-CHO = lambda ch=0: (ids["TS_CHO_ON"], 1, ch)
-DRV = lambda ch=0: (ids["TS_DRV_ON"], 1, ch)
+CHO = lambda ch=0, v=1000: (ids["TS_CHO"], v, ch)      # a track's Chorus amount (0 = off)
+DRV = lambda ch=0, v=1000: (ids["TS_DRV"], v, ch)
 
 uc, node = setup()
 T = 48000
@@ -214,8 +213,7 @@ uc, node = setup()
 ml, mr, _ = run_ins(uc, node, x, [0.0] * T, [CHO()], stereo=0)
 check(rms([a - b for a, b in zip(ml, mr)][4800:]) > 0.02, "chorus on a mono track: comes out stereo")
 uc, node = setup()
-pending.clear(); pending.append((ids["TS_CHO"], 500, 0))
-h, _, _ = run_ins(uc, node, x, x, [CHO()])
+h, _, _ = run_ins(uc, node, x, x, [CHO(v=500)])
 check(abs(rms([a - b for a, b in zip(h, x)][4800:]) - 0.5 * rms([a - b for a, b in zip(l, x)][4800:])) < 0.01, "chorus Amount 500: half as much")
 wid = []
 for wv in (0, 1000):
@@ -363,13 +361,12 @@ check(b13[4] == 0 and b14[4] == 0 and max(map(abs, wet)) > 0.05 and all(abs(a - 
       "FX1 Send 500 / FX2 Send 1000: half and all of the Rev Delay's output into the delay's and reverb's buses")
 check(len(revs) > 0 and revs[-1][0] == node, "the reverb (hall_process) runs after the send FX")
 
-# per track: only the channels switched on, each by its own Amount
+# per track: only the channels turned up, each by its own Amount
 x = [0.25 * math.sin(2 * math.pi * 220 * i / 48000) for i in range(4800)]
 DRV0 = [(ids["DRV_DRIVE"], 1000), (ids["DRV_LEVEL"], 500), (ids["DRV_TONE"], 1000)]
 full, _, _ = run_ins(setup()[0], node, x, x, [DRV()] + DRV0)        # (channel 0, Amount 1000)
 uc, node = setup()
-pending.clear(); ts_all(uc, 0); ts_all(uc, 500, ch=3)
-h3, _, _ = run_ins(uc, node, x, x, [DRV(3)] + DRV0, ch=3)
+h3, _, _ = run_ins(uc, node, x, x, [DRV(3, 500)] + DRV0, ch=3)
 h5, _, _ = run_ins(uc, node, x, x, ch=5)
 mid = [0.5 * (a + b) for a, b in zip(x, full)]
 e3 = max(abs(a - b) for a, b in zip(h3[2400:], mid[2400:])); e5 = max(abs(a - b) for a, b in zip(h5, x))
@@ -378,7 +375,6 @@ check(e3 < 0.01 and max(abs(a - b) for a, b in zip(h3[2400:], x[2400:])) > 0.05 
 # four tracks at once; a fifth stays dry until one is switched off
 uc, node = setup()
 pending.clear()
-pending.extend([(ids["TS_DRV"], 1000, c) for c in range(6)])
 seg = (x * 2)[:32 * 200]
 def five(evs=()):
     outs = []
@@ -391,8 +387,8 @@ def five(evs=()):
     return [max(abs(a - b) for a, b in zip(outs[-1][c], seg[-32:])) for c in range(5)]
 d = five([DRV(c) for c in range(5)] + DRV0)
 check(all(v > 0.01 for v in d[:4]) and d[4] < 1e-6, f"four tracks with inserts at once, a fifth stays dry ({[round(v, 3) for v in d]})")
-d = five([(ids["TS_DRV_ON"], 0, 1)])
-check(d[1] < 1e-6 and d[4] > 0.01 and all(v > 0.01 for v in (d[0], d[2], d[3])), f"one switched off: its slot goes to the fifth ({[round(v, 3) for v in d]})")
+d = five([DRV(1, 0)])
+check(d[1] < 1e-6 and d[4] > 0.01 and all(v > 0.01 for v in (d[0], d[2], d[3])), f"one turned to 0: its slot goes to the fifth ({[round(v, 3) for v in d]})")
 
 # a project load: hundreds of messages in one go (the master queue keeps only 64). Ours go straight in through
 # sfx_msg, the rest on to the stock dispatcher.
@@ -403,12 +399,12 @@ stub(uc, 0x08052444, fwd)
 EVM = 0x24070000
 def msg(pid, val, target=0x15):
     uc.mem_write(EVM, struct.pack("<B7xIHHiI", 0x39, target, pid, 0, val, 0)); call(uc, s7["sfx_msg"], CTX, EVM)
-for c in range(12):                             # every channel's set: 40 stock params, then our five
+for c in range(12):                             # every channel's set: 40 stock params, then our three
     for k in range(40): msg(0x100 + k, 0, c)
-    for k in ("TS_CHO", "TS_DRV", "TS_D2", "TS_CHO_ON", "TS_DRV_ON"): msg(ids[k], (1 if k.endswith("_ON") else 500) if c == 3 and k != "TS_CHO_ON" else 0, c)
+    for k in ("TS_CHO", "TS_DRV", "TS_D2"): msg(ids[k], 500 if c == 3 and k != "TS_CHO" else 0, c)
 for k, v in DRV0: msg(k, v)
 msg(0x4A, 5); msg(0x63, 500, 3)                 # the FX1 delay's Pitch and a channel's Pan: not ours
-msg(ids["TS_CHO_ON"], 1, 0x14)                  # (an id of ours sent to a node, not a channel: not ours)
+msg(ids["TS_CHO"], 1000, 0x14)                 # (an id of ours sent to a node, not a channel: not ours)
 lb, _, _ = run_ins(uc, node, x, x, ch=3)
 eb = max(abs(a - b) for a, b in zip(lb[2400:], mid[2400:]))
 print(f"     after {len(fwd)} forwarded messages: channel 4's drive (Amount 500) off the expected by {eb:.4f}")
@@ -430,7 +426,7 @@ w32(uc, HEAP, top)
 uc, node = setup()
 pending.clear()
 x = [0.3 * math.sin(2 * math.pi * 330 * i / 48000) for i in range(3200)]
-evs = [e for c in range(4) for e in (CHO(c), DRV(c), (ids["TS_CHO"], 1000, c), (ids["TS_DRV"], 1000, c), (ids["TS_D2"], 1000, c))] + [(ids["D2_ON"], 1)]
+evs = [e for c in range(4) for e in (CHO(c), DRV(c), (ids["TS_D2"], 1000, c))] + [(ids["D2_ON"], 1)]
 cost = 0
 for b in range(100):
     events(uc, evs if b == 0 else []); n = 0
@@ -471,20 +467,19 @@ for r_, v in zip(R, (0x24032000, 0x117, 5, STR)): uc.reg_write(r_, v)
 uc.reg_write(UC_ARM_REG_SP, sp); uc.reg_write(UC_ARM_REG_LR, RET | 1)
 uc.emu_start(s4["dly_defs"] | 1, RET, count=1_000_000)
 ours = {d[0]: d for d in defs if d[0] in ids.values()}
-TS = {ids["TS_CHO"], ids["TS_DRV"], ids["TS_D2"], ids["TS_CHO_ON"], ids["TS_DRV_ON"]}
-check([ours[ids[k]][1:5] for k in ("TS_CHO", "TS_DRV", "TS_D2", "TS_CHO_ON", "TS_DRV_ON")]
-      == [(8, "Chorus:", 0, 1000), (8, "Drive:", 0, 1000), (8, "FX5:", 0, 1000), (4, "Chorus:", 0, 1), (4, "Drive:", 0, 1)],
-      "M4: per track Chorus and Drive amounts, FX5 (like FX1: type 8, 0..1000), Chorus and Drive on (toggles)")
+TS = {ids["TS_CHO"], ids["TS_DRV"], ids["TS_D2"]}
+check([ours[ids[k]][1:5] for k in ("TS_CHO", "TS_DRV", "TS_D2")] == [(8, "Chorus:", 0, 1000), (8, "Drive:", 0, 1000), (8, "FX5:", 0, 1000)],
+      "M4: per track Chorus and Drive amounts, FX5 (like FX1: type 8, 0..1000)")
 print("     " + ", ".join(f"{d[2]}{d[5]}" for d in ours.values()))
 lists = {d[0]: d for d in ldefs if d[0] in ids.values()}
 print("     lists: " + ", ".join(f"{d[1]}{d[4]} x{d[3]}" for d in lists.values()))
-check(len(ours) == 22 and all(i not in ours for i in (0x44, 0x45, 0x47, 0x48, 0x49, 0x56, 0x57)) and ours[ids["D2_TIME"]][3:5] == (0, 1000) and ours[ids["D2_BEAT"]][1] == 4,
-      "M4: the 22 knobs and toggles defined (per track too); the old chorus/drive On, Level, FX1/FX2 Send gone")
+check(len(ours) == 20 and all(i not in ours for i in (0x44, 0x45, 0x47, 0x48, 0x49, 0x56, 0x57)) and ours[ids["D2_TIME"]][3:5] == (0, 1000) and ours[ids["D2_BEAT"]][1] == 4,
+      "M4: the 20 knobs and toggles defined (per track too); the old chorus/drive On, Level, FX1/FX2 Send gone")
 names = lambda p, n: [cs(u32(uc, p + 4 * i)) for i in range(n)]
 check(set(lists) == {ids["CHO_MODE"], ids["D2_SYNC"]} and lists[ids["CHO_MODE"]][3] == 3 and names(lists[ids["CHO_MODE"]][2], 3) == ["I", "II", "I+II"]
       and lists[ids["D2_SYNC"]][3] == 12 and names(lists[ids["D2_SYNC"]][2], 12)[::4] == ["1/64", "1/16D", "1/4"],
       "M4: Mode a list (I, II, I+II), Delay 2's synced Time the stock delay's 12 note values")
-check(len(set(d[5] for d in ours.values()) | set(d[4] for d in lists.values())) == 24, "M4: each with its own key")
+check(len(set(d[5] for d in ours.values()) | set(d[4] for d in lists.values())) == 22, "M4: each with its own key")
 check(u32(uc, 0x38800FE4) == 0, "M4: boot leaves the FX button at the reverb")
 
 # the reverb set: hall's table, then ours, ending at the common tail with r4, r5 intact
@@ -571,7 +566,7 @@ added.clear()
 h = uc.hook_add(UC_HOOK_CODE, m4_add, begin=0x081205E2, end=0x081205E2)
 call(uc, s4["ts_set_add"], 0x24030000, 0x173, 1)
 uc.hook_del(h)
-check(added == [(0x173, 1)] + [(ids[k], 0) for k in ("TS_CHO", "TS_DRV", "TS_D2", "TS_CHO_ON", "TS_DRV_ON")], f"channel set: 0x173, then our five per-track params at 0 ({added})")
+check(added == [(0x173, 1)] + [(ids[k], 0) for k in ("TS_CHO", "TS_DRV", "TS_D2")], f"channel set: 0x173, then our three per-track params at 0 ({added})")
 views.clear()
 APP = 0xC0200000
 PG = 0xC0300000                                  # (the screen's owner is not the button handler's app)
@@ -592,15 +587,7 @@ VT, HIDE = 0x20001000, 0x20001100                 # a fake widget vtable: slot 0
 uc.mem_write(VT + 0x2C, struct.pack("<I", HIDE | 1)); uc.mem_write(HIDE, b"\x70\x47")
 stub(uc, HIDE, shown); stub(uc, 0x081288FC)
 for off in (0xC398, 0xC768, 0xCB38, 0xCF08, 0xD2D8, 0xD6A8, 0xDA78, 0xDE48, 0xE814): w32(uc, PG + off, VT)
-OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xDE48, 1)]
-togs, tinfos, labels = [], [], []
-stub(uc, 0x081280B4, togs); stub(uc, 0x081280CA, tinfos)
-def lab(uc, a, s_, _):
-    r0, r1, r2 = (uc.reg_read(r) for r in R[:3])
-    labels.append((r0 - PG, cs(r1) if a != 0x081398CC else (cs(r1), cs(r2))))
-    uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
-for a_ in (0x081398CC, 0x08139724, 0x08128050): uc.hook_add(UC_HOOK_CODE, lab, begin=a_, end=a_)
-def tog(off): return struct.unpack("<HHB", uc.mem_read(PG + off + 0xF8, 5))   # slot, id, inverted
+OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xE814, 1)]
 stub(uc, 0x08128D9C, turns)
 def press_track():
     """the track button as the dispatcher handles it (our two hooks), then the screen's setup (event 0x8c)"""
@@ -621,34 +608,23 @@ check(u32(uc, 0x38800FF4) == 0, "the track screen shown any other way (flag left
 w32(uc, 0x38800FF4, 2); shown.clear()
 call(uc, s4["ts_tp_setup"], PG, 1)
 check(u32(uc, 0x38800FF4) == 1 and [(r[0] - PG, r[1]) for r in shown] == OTHERS,
-      f"our sends' setup: Vol, Pan, Gain, the CUE knob, OUT4 hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
+      f"our sends' setup: Vol, Pan, Gain, CUE (knob and button) hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
 shown.clear(); w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_setup"], PG, 1)
 check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], "the stock half shows them all again")
 w32(uc, PG + 0xEBBC, 1); w32(uc, 0x38800FF4, 1); binds.clear(); shown.clear(); infos.clear()
-uc.mem_write(0x38800FEC, b"\0\0"); togs.clear(); labels.clear()   # (the buttons still stock)
+uc.mem_write(0x38800E60, struct.pack("<II", 0x4E454553, 1 | 4 | 8))   # the M7 has seen: M, P, S
 w32(uc, 0x24030000, 0); uc.mem_write(0x24030004, struct.pack("<H", 3))
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
       and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "FX5", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
-check(tog(0xE814) == (3, ids["TS_CHO_ON"], 0) and tog(0xE9E8) == (3, ids["TS_DRV_ON"], 0)
-      and [(t_[0] - PG, t_[1]) for t_ in togs] == [(0xE814, 300 + ids["TS_CHO_ON"]), (0xE9E8, 300 + ids["TS_DRV_ON"])]
-      and labels == [(0xE814, ("CHORUS", "")), (0xE9E8, ("DRIVE", ""))] and infos[3:] == [(3, ids["TS_CHO_ON"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV_ON"], b"\x01\x00\x00\x01\x00")],
-      f"our sends' fill: the CUE and SIDE CHAIN buttons become Chorus and Drive on for track 4 ({tog(0xE814)}, {tog(0xE9E8)}, {labels})")
-togs.clear(); labels.clear(); uc.mem_write(PG + 0xBC9C, struct.pack("<H", 5)); w32(uc, 0x38800FF4, 2)      # (armed: shown from the track button)
-call(uc, s4["ts_tp_setup"], PG, 1)
-check(labels == [] and tog(0xE814) == (5, ids["TS_CHO_ON"], 0) and [t_[1] for t_ in togs] == [500 + ids["TS_CHO_ON"], 500 + ids["TS_DRV_ON"]],
-      "our sends shown again (track 6 selected): the buttons rebound to it, labels already ours")
-w32(uc, 0x38800FF4, 0); binds.clear(); togs.clear(); labels.clear()
+check(cs(PG + 0xDE48 + 0xF8) == "M-PS-", f"our sends' fill: OUT4 named after what the M7 has seen ({cs(PG + 0xDE48 + 0xF8)})")
+w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
-check(binds == [] and tog(0xE814) == (3, 0x173, 0) and tog(0xE9E8) == (3, 0x2B, 1) and labels == [(0xE814, "CUE"), (0xE9E8, "SIDE CHAIN")]
-      and [t_[1] for t_ in togs] == [300 + 0x173, 300 + 0x2B], f"stock half's fill: knobs untouched, CUE and SIDE CHAIN back as stock ({labels})")
-labels.clear(); togs.clear()
-call(uc, s4["ts_tp_fill"], PG, 0x24030000)
-check(labels == [] and togs == [], "stock fill again: nothing more to restore")
+check(binds == [], "stock half's fill untouched")
 w32(uc, 0x38800FF4, 1); turns.clear()
 call(uc, s4["ts_tp_turn"], PG + 0xDE48, 1); call(uc, s4["ts_tp_turn"], PG + 0xCF08, 1)
 w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_turn"], PG + 0xDE48, 1)
-check([t[0] - PG for t in turns] == [0xCF08, 0xDE48], "encoder 4 (hidden OUT4) does nothing on our sends only")
+check([t[0] - PG for t in turns] == [0xCF08, 0xDE48], "encoder 4 (OUT4, our check) does nothing on our sends only")
 print("all passed")
