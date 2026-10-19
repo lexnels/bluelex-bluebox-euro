@@ -105,22 +105,25 @@ struct sfx_ptr { uint32_t magic; struct sfx *s; };
 #define SP ((volatile struct sfx_ptr *)0x38800fa0u)   /* own 32-byte line, M7 only */
 
 /* What the M7 has seen since boot, for the M4 to show on the track sends page (src/dly_m4.c): a check on hardware */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; };
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)  /* own 32-byte line (free: dly_shared ends at 0xe5c) */
-#define SEEN_MAGIC 0x4e454553u      /* "SEEN" */
-#define SEEN_MSG   1u               /* one of our messages, through sfx_msg */
-#define SEEN_QUEUE 2u               /* one of ours, from the master queue (sfx_msg missed it) */
-#define SEEN_PROC  4u               /* sfx_process ran */
-#define SEEN_STRIP 8u               /* sfx_strip ran with our state */
+#define SEEN_MAGIC 0x32454553u      /* "SEE2" */
+#define SEEN_CTOR  1u               /* sfx_ctor ran (the graph built) */
+#define SEEN_PROC  2u               /* sfx_process called (state or not) */
+#define SEEN_STRIP 4u               /* sfx_strip called (state or not) */
+#define SEEN_MSG   8u               /* one of our ids reached sfx_msg (state or not) */
 #define SEEN_INS   16u              /* a track's inserts ran */
+#define SEEN_QUEUE 32u              /* one of ours, from the master queue (sfx_msg missed it) */
 #define SCB_DCCMVAC (*(volatile uint32_t *)0xe000ef68u)  /* clean a D-cache line, so the M4 sees it */
 static void seen(uint32_t bit, unsigned ch, unsigned id)
 {
     if (SEEN->magic == SEEN_MAGIC && (SEEN->bits & bit) == bit && !id)
         return;
+    bkp_enable();
     PWR_CR1 |= 1u << 8;
     if (SEEN->magic != SEEN_MAGIC) {
         SEEN->bits = 0;
+        SEEN->why = 9;
         SEEN->magic = SEEN_MAGIC;
     }
     SEEN->bits |= bit;
@@ -128,6 +131,16 @@ static void seen(uint32_t bit, unsigned ch, unsigned id)
         SEEN->last_ch = (uint16_t)ch;
         SEEN->last_id = (uint16_t)id;
     }
+    __asm__ volatile("dsb");
+    SCB_DCCMVAC = (uint32_t)SEEN;
+    __asm__ volatile("dsb");
+}
+static void seen_why(uint32_t w)
+{
+    if (SEEN->magic == SEEN_MAGIC && SEEN->why == w)
+        return;
+    seen(0, 0, 0);                  /* (the line set up) */
+    SEEN->why = w;
     __asm__ volatile("dsb");
     SCB_DCCMVAC = (uint32_t)SEEN;
     __asm__ volatile("dsb");
@@ -232,15 +245,21 @@ static void update(struct sfx *s)
 /* Our state, once sfx_ctor has set it up in this heap's life; 0 before (backup SRAM keeps the pointer, and SDRAM
  * keeps the old state over a reset, so after one both look valid until the graph is built again: the bump pointer
  * tells, it is back below them until then). */
-static struct sfx *state(void)
+static uint32_t why_not(void)       /* 0: our state is valid; else the first check that fails */
 {
     bkp_enable();
     struct sfx *s = SP->s;
     uint32_t a = (uint32_t)s;
-    if (SP->magic != SFX_MAGIC || a < 0xc0000000u || a + sizeof(struct sfx) > HEAP_TOP
-        || s->magic != SFX_MAGIC || s->self != s)
-        return 0;
-    return s;
+    if (SP->magic != SFX_MAGIC) return 1;
+    if (a < 0xc0000000u) return 2;
+    if (a + sizeof(struct sfx) > HEAP_TOP) return 3;
+    if (s->magic != SFX_MAGIC) return 4;
+    if (s->self != s) return 5;
+    return 0;
+}
+static struct sfx *state(void)
+{
+    return why_not() ? 0 : SP->s;
 }
 
 /* Replaces bl FUN_08052e30 @0x080518d2 (the delay's constructor, while the graph is built). */
@@ -254,7 +273,7 @@ void *sfx_ctor(void *obj)
     /* the same heap life (a rebuilt graph): keep ours; after a reset the bump pointer is back below it */
     if (!(SP->magic == SFX_MAGIC && a >= 0xc0000000u && a + sizeof(struct sfx) <= HEAP_TOP
           && s->magic == SFX_MAGIC && s->self == s)) {
-        SEEN->magic = 0;            /* a fresh boot: nothing seen yet */
+        SEEN->magic = 0;            /* a fresh state: nothing seen yet */
         s = (struct sfx *)fw_alloc(sizeof(struct sfx));
         zero(s, sizeof(struct sfx));
         defaults(s);
@@ -264,6 +283,7 @@ void *sfx_ctor(void *obj)
         SP->s = s;
         SP->magic = SFX_MAGIC;
     }
+    seen(SEEN_CTOR, 0, 0);
     return r;
 }
 
@@ -542,17 +562,17 @@ static void out(const struct dest *d, float *g, float gt, int32_t level, int32_t
  */
 void sfx_msg(void *ctx, struct fw_ev *ev)
 {
+    if (ev->type == 0x39 && ev->id >= SFX_CHO_MODE && ev->id <= SFX_D2_DRIFT)   /* (our ids' range) */
+        seen(SEEN_MSG, ev->target, ev->id);
     if (ev->type == 0x39) {
         struct sfx *s = state();
         if (s) {
             if (is_ts(ev->id) && ev->target < NCH) {
                 set_ts(s, ev->id, ev->target, ev->value);
-                seen(SEEN_MSG, ev->target, ev->id);
                 return;
             }
             if (set(s, ev->id, ev->value)) {
                 s->dirty = 1;
-                seen(SEEN_MSG, ev->target, ev->id);
                 return;
             }
         }
@@ -563,6 +583,8 @@ void sfx_msg(void *ctx, struct fw_ev *ev)
 /* The reverb's process (vtable slot 0x0806adac): the Rev Delay, then the reverb (hall_process) and the chain. */
 unsigned sfx_process(void *obj, void *ctx)
 {
+    seen(SEEN_PROC, 0, 0);
+    seen_why(why_not());
     struct sfx *s = state();
     if (!s)
         return fw_reverb(obj, ctx);
@@ -582,7 +604,6 @@ unsigned sfx_process(void *obj, void *ctx)
             if (ours)
                 seen(SEEN_QUEUE, ev.target, ev.id);
         }
-    seen(SEEN_PROC, 0, 0);
     if (s->d2_beat) {               /* the song tempo, as the stock delay reads it (FUN_08053234: ctx[0] + 0x18) */
         float bpm = *(volatile float *)(*(uint8_t **)ctx + 0x18);
         if (!(bpm >= 20.f && bpm <= 400.f)) bpm = 120.f;
@@ -629,12 +650,12 @@ unsigned sfx_process(void *obj, void *ctx)
  * ch + 20, after fader, pan and mute) times its Rev Delay send into that FX's input. */
 void sfx_strip(void *mixer, void *in, unsigned idx, float *ch, void *mainb, void *ctx)
 {
+    seen(SEEN_STRIP, 0, 0);
     struct sfx *s = state();            /* the mixer runs from boot, maybe before the graph's FX are built */
     if (!s || idx >= NCH) {
         fw_strip(mixer, in, idx, ch, mainb, ctx);
         return;
     }
-    seen(SEEN_STRIP, 0, 0);
     struct ins *k = slot(s, idx);
     struct bus tb;
     float tl[MAXN], tr[MAXN];

@@ -363,22 +363,27 @@ static void ts_hide(void *page, int hide)
         ts_vis(page, TP_OTHERS[i], hide);
 }
 
-/* What the M7 has seen since boot (src/sfx_m7.c writes it), shown in FX5's name on our sends ("5" then a letter
- * for each, a dash for what has not happened; OUT4 is hidden when OUT3/OUT4 are a stereo pair). M = our settings reach it, Q = only through the master queue, P = its FX run,
- * S = the mixer's channels pass through us, I = a track's chorus or drive ran. */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; };
+/* What the M7 has seen (src/sfx_m7.c writes it), shown as FX5's name on our sends: first a digit, 0 when the M7's
+ * FX state is valid (else which check failed, 9 not checked yet), then a letter for each, a dash for what has not
+ * happened: C = the graph built ours, P = the FX process called, S = the mixer's channels pass through us, M = one of
+ * our settings arrived, I = a track's chorus or drive ran. "NONE" when the M7 has written nothing. */
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)
-#define SEEN_MAGIC 0x4e454553u
+#define SEEN_MAGIC 0x32454553u
 static void ts_seen(void *page)
 {
-    static const char L[5] = { 'M', 'Q', 'P', 'S', 'I' };
+    static const char L[5] = { 'C', 'P', 'S', 'M', 'I' };
     su_mode();                      /* backup SRAM on */
-    uint32_t bits = SEEN->magic == SEEN_MAGIC ? SEEN->bits : 0;
     char *name = (char *)TP_KNOB(page, TP_OUT3) + 0xf8;
-    name[0] = '5';
-    for (int i = 0; i < 5; i++)
-        name[1 + i] = bits >> i & 1 ? L[i] : '-';
-    name[6] = 0;
+    if (SEEN->magic != SEEN_MAGIC) {
+        name[0] = 'N'; name[1] = 'O'; name[2] = 'N'; name[3] = 'E'; name[4] = 0;
+    } else {
+        uint32_t bits = SEEN->bits, w = SEEN->why;
+        name[0] = (char)('0' + (w > 9 ? 9 : w));
+        for (int i = 0; i < 5; i++)
+            name[1 + i] = bits >> i & 1 ? L[i] : '-';
+        name[6] = 0;
+    }
     TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
     fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
 }
