@@ -618,8 +618,7 @@ call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
-      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "FX5", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
-check(cs(PG + 0xDE48 + 0xF8) == "M-PS-", f"our sends' fill: OUT4 named after what the M7 has seen ({cs(PG + 0xDE48 + 0xF8)})")
+      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "5M-PS-", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
 w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 check(binds == [], "stock half's fill untouched")

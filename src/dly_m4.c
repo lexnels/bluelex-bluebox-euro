@@ -355,7 +355,7 @@ static void ts_vis(void *page, unsigned off, int hide)
     uint8_t *w = TP_KNOB(page, off);
     ((void (*)(void *, int))(*(uint32_t **)w)[0x2c / 4])(w, hide);
 }
-/* on our sends Vol, Pan, Gain and CUE (knob and button) are hidden; OUT4 shows the M7's check (ts_seen) */
+/* on our sends Vol, Pan, Gain and CUE (knob and button) are hidden */
 static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_CUE_BTN };
 static void ts_hide(void *page, int hide)
 {
@@ -363,8 +363,8 @@ static void ts_hide(void *page, int hide)
         ts_vis(page, TP_OTHERS[i], hide);
 }
 
-/* What the M7 has seen since boot (src/sfx_m7.c writes it), shown as OUT4's name on our sends: a letter for each, a
- * dash for what has not happened. M = our settings reach it, Q = only through the master queue, P = its FX run,
+/* What the M7 has seen since boot (src/sfx_m7.c writes it), shown in FX5's name on our sends ("5" then a letter
+ * for each, a dash for what has not happened; OUT4 is hidden when OUT3/OUT4 are a stereo pair). M = our settings reach it, Q = only through the master queue, P = its FX run,
  * S = the mixer's channels pass through us, I = a track's chorus or drive ran. */
 struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)
@@ -374,12 +374,13 @@ static void ts_seen(void *page)
     static const char L[5] = { 'M', 'Q', 'P', 'S', 'I' };
     su_mode();                      /* backup SRAM on */
     uint32_t bits = SEEN->magic == SEEN_MAGIC ? SEEN->bits : 0;
-    char *name = (char *)TP_KNOB(page, TP_OUT4) + 0xf8;
+    char *name = (char *)TP_KNOB(page, TP_OUT3) + 0xf8;
+    name[0] = '5';
     for (int i = 0; i < 5; i++)
-        name[i] = bits >> i & 1 ? L[i] : '-';
-    name[5] = 0;
-    TP_KNOB(page, TP_OUT4)[0x1f7] = 0;
-    fw_knob_name(TP_KNOB(page, TP_OUT4), 1);
+        name[1 + i] = bits >> i & 1 ? L[i] : '-';
+    name[6] = 0;
+    TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
+    fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
 }
 
 /* bl FUN_08133884 @0x08135720 (event 0x8c: the track screen shown, sub = its half): the first half ends our sends */
@@ -424,11 +425,7 @@ void ts_tp_fill(void *page, void *arg)
     bind(page, TP_FX2, slot, SFX_TS_DRV);       /* Drive amount */
     bind(page, TP_OUT3, slot, SFX_TS_D2);
     /* OUT3's name is its own text (+0xf8: "OUT3" or "OUT3&4", set after the bind), not the param's */
-    char *name = (char *)TP_KNOB(page, TP_OUT3) + 0xf8;
-    name[0] = 'F'; name[1] = 'X'; name[2] = '5'; name[3] = 0;
-    TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
-    fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
-    ts_seen(page);
+    ts_seen(page);              /* (FX5's name, with the M7's check) */
     ts_hide(page, 1);
 }
 
