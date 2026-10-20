@@ -99,16 +99,16 @@ def m7():
 uc = m7()
 r = call(uc, s7["sfx_ctor"], 0x24050000)
 p = u32(uc, 0x38800FA4)
-size = u32(uc, HEAP) - p
+size = u32(uc, HEAP) - 0xC0010000                  # (with its 32-byte gaps)
 print(f"     state {size} bytes at {p:#x}")
-check(r == 0x24050000 and p == 0xC0010000 and u32(uc, 0x38800FA0) == 0x58464453, "sfx_ctor: runs the delay's constructor, then allocates its state")
+check(r == 0x24050000 and p == 0xC0010020 and u32(uc, 0x38800FA0) == 0x58464453, "sfx_ctor: runs the delay's constructor, then allocates its state")
 check(0x100000 < size <= 1052912 and u32(uc, p) == 0x58464453 and u32(uc, p + 4) == p, "state no bigger than build 2's (1052912 bytes; 2 MB ran the SDRAM pool out at boot), marked")
-check(bytes(uc.mem_read(p + size - 0x1010, 0x1000)) == bytes(0x1000), "state zeroed (delay lines)")
+check(bytes(uc.mem_read(p + 0x10, 0x1000)) == bytes(0x1000), "state zeroed (delay lines first)")
 call(uc, s7["sfx_ctor"], 0x24050000)
-check(u32(uc, 0x38800FA4) == p and u32(uc, HEAP) == p + size, "a rebuilt graph keeps the same memory")
+check(u32(uc, 0x38800FA4) == p and u32(uc, HEAP) == 0xC0010000 + size, "a rebuilt graph keeps the same memory")
 w32(uc, HEAP, 0xC0010000)                          # after a reset: the allocator is back below it
 call(uc, s7["sfx_ctor"], 0x24050000)
-check(u32(uc, 0x38800FA4) == 0xC0010000 and u32(uc, HEAP) == p + size, "after a reset it allocates again")
+check(u32(uc, 0x38800FA4) == 0xC0010020 and u32(uc, HEAP) == 0xC0010000 + size, "after a reset it allocates again (on its own cache lines)")
 
 # ---- M7: processing (the stock FX-return node code runs after ours)
 BUS = lambda port: CTX + 0x150E4 + port * 20
@@ -179,7 +179,7 @@ sine = [0.5 * math.sin(2 * math.pi * 440 * i / 48000) for i in range(32)]
 block(uc, node, sine, sine)        # (takes the track send events)
 l, r, n = block(uc, node, sine, sine)
 print(f"     all off: {n} instructions")
-check(max(abs(a - b) for a, b in zip(l, sine)) < 1e-7 and n < 200, "all off: bus 12 untouched, cheap")
+check(max(abs(a - b) for a, b in zip(l, sine)) < 1e-7 and n < 300, "all off: bus 12 untouched, cheap")
 
 # per-track inserts: a channel's input, through its drive and chorus, is what the strip gets
 def run_ins(uc, node, sig_l, sig_r, evs=(), ch=0, skip=0, stereo=1):
@@ -587,7 +587,7 @@ VT, HIDE = 0x20001000, 0x20001100                 # a fake widget vtable: slot 0
 uc.mem_write(VT + 0x2C, struct.pack("<I", HIDE | 1)); uc.mem_write(HIDE, b"\x70\x47")
 stub(uc, HIDE, shown); stub(uc, 0x081288FC)
 for off in (0xC398, 0xC768, 0xCB38, 0xCF08, 0xD2D8, 0xD6A8, 0xDA78, 0xDE48, 0xE814): w32(uc, PG + off, VT)
-OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xE814, 1)]
+OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xE814, 1)]
 stub(uc, 0x08128D9C, turns)
 def press_track():
     """the track button as the dispatcher handles it (our two hooks), then the screen's setup (event 0x8c)"""
@@ -608,17 +608,17 @@ check(u32(uc, 0x38800FF4) == 0, "the track screen shown any other way (flag left
 w32(uc, 0x38800FF4, 2); shown.clear()
 call(uc, s4["ts_tp_setup"], PG, 1)
 check(u32(uc, 0x38800FF4) == 1 and [(r[0] - PG, r[1]) for r in shown] == OTHERS,
-      f"our sends' setup: Vol, Pan, Gain, CUE (knob and button) hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
+      f"our sends' setup: Vol, Pan, Gain, the CUE button hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
 shown.clear(); w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_setup"], PG, 1)
 check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], "the stock half shows them all again")
 w32(uc, PG + 0xEBBC, 1); w32(uc, 0x38800FF4, 1); binds.clear(); shown.clear(); infos.clear()
-uc.mem_write(0x38800E60, struct.pack("<IIHHI", 0x32454553, 1 | 2 | 4, 0, 0, 0))   # the M7: state valid, seen C, P, S
+uc.mem_write(0x38800E60, struct.pack("<IIHHIIII", 0x32454553, 1 | 2 | 4, 0, 0, 0, 0xC07A1230, 0xC0B3F000, 0xC4000000))   # the M7: state valid, seen C, P, S
 w32(uc, 0x24030000, 0); uc.mem_write(0x24030004, struct.pack("<H", 3))
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
-      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "0CPS--", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
+      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "0CPS-", (cs(PG + 0xCF08 + 0xF8), cs(PG + 0xD2D8 + 0xF8), cs(PG + 0xD6A8 + 0xF8)) == ("AC07A1", "TC0B3F", "LC400") and f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
 w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 check(binds == [], "stock half's fill untouched")

@@ -71,9 +71,14 @@ struct ins {
     int16_t buf[CHO_N];                                         /* chorus line, +-2 as +-32767 */
 };
 
+/* The delay lines first, our settings and marks last: when something else writes over the start of this block (it
+ * did on hardware: build 18 found the start's mark gone), it hits only the oldest echoes. head/hself mark the
+ * start, so the check shows whether that still happens. */
 struct sfx {
-    uint32_t magic;
-    struct sfx *self;
+    uint32_t head;
+    struct sfx *hself;
+    int16_t d2_l[D2_N], d2_r[D2_N];                             /* +-1 as +-32767 (sat keeps them in range) */
+    struct ins ins[NSLOT];
     /* params, as the M4 sends them */
     int32_t cho_mode, cho_rate, cho_depth, cho_width;
     int32_t drv_drive, drv_tone, drv_level;
@@ -96,8 +101,8 @@ struct sfx {
     float d2_dph, d2_dnoise, d2_dtgt, d2_dm;                    /* Drift: LFO phase, wander, its target, extra delay */
     uint32_t d2_dcount, d2_drng;
     uint32_t dirty;                                             /* params changed by sfx_msg since the last update() */
-    struct ins ins[NSLOT];
-    int16_t d2_l[D2_N], d2_r[D2_N];                             /* +-1 as +-32767 (sat keeps them in range) */
+    uint32_t magic;
+    struct sfx *self;
 };
 #define SFX_MAGIC 0x58464453u       /* "SDFX" */
 
@@ -105,7 +110,7 @@ struct sfx_ptr { uint32_t magic; struct sfx *s; };
 #define SP ((volatile struct sfx_ptr *)0x38800fa0u)   /* own 32-byte line, M7 only */
 
 /* What the M7 has seen since boot, for the M4 to show on the track sends page (src/dly_m4.c): a check on hardware */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why; };
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, limit; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)  /* own 32-byte line (free: dly_shared ends at 0xe5c) */
 #define SEEN_MAGIC 0x32454553u      /* "SEE2" */
 #define SEEN_CTOR  1u               /* sfx_ctor ran (the graph built) */
@@ -135,12 +140,17 @@ static void seen(uint32_t bit, unsigned ch, unsigned id)
     SCB_DCCMVAC = (uint32_t)SEEN;
     __asm__ volatile("dsb");
 }
+#define HEAP_LIMIT (*(volatile uint32_t *)0x24000000u)  /* FUN_080413d0's SDRAM limit */
 static void seen_why(uint32_t w)
 {
-    if (SEEN->magic == SEEN_MAGIC && SEEN->why == w)
+    uint32_t a = SP->s ? (uint32_t)SP->s : 0, top = HEAP_TOP, lim = HEAP_LIMIT;
+    if (SEEN->magic == SEEN_MAGIC && SEEN->why == w && SEEN->addr == a && SEEN->top == top && SEEN->limit == lim)
         return;
     seen(0, 0, 0);                  /* (the line set up) */
     SEEN->why = w;
+    SEEN->addr = a;
+    SEEN->top = top;
+    SEEN->limit = lim;
     __asm__ volatile("dsb");
     SCB_DCCMVAC = (uint32_t)SEEN;
     __asm__ volatile("dsb");
@@ -253,9 +263,15 @@ static uint32_t why_not(void)       /* 0: our state is valid; else the first che
     if (SP->magic != SFX_MAGIC) return 1;
     if (a < 0xc0000000u) return 2;
     if (a + sizeof(struct sfx) > HEAP_TOP) return 3;
-    if (s->magic != SFX_MAGIC) return 4;
-    if (s->self != s) return 5;
+    int head = s->head == SFX_MAGIC && s->hself == s, tail = s->magic == SFX_MAGIC && s->self == s;
+    if (!tail) return head ? 6 : 4;
     return 0;
+}
+static uint32_t diag(void)          /* why_not(), and 7 when valid but the start was written over */
+{
+    uint32_t w = why_not();
+    struct sfx *s = SP->s;
+    return w ? w : s->head == SFX_MAGIC && s->hself == s ? 0 : 7;
 }
 static struct sfx *state(void)
 {
@@ -274,12 +290,15 @@ void *sfx_ctor(void *obj)
     if (!(SP->magic == SFX_MAGIC && a >= 0xc0000000u && a + sizeof(struct sfx) <= HEAP_TOP
           && s->magic == SFX_MAGIC && s->self == s)) {
         SEEN->magic = 0;            /* a fresh state: nothing seen yet */
-        s = (struct sfx *)fw_alloc(sizeof(struct sfx));
+        /* on 32-byte lines of its own, with a line's gap on each side: the M7's D-cache works in 32-byte lines, and
+         * a neighbour's cache maintenance (invalidating a DMA buffer next to us) would throw away our writes to a
+         * shared line (build 18 on hardware: the state's first bytes lost) */
+        s = (struct sfx *)((fw_alloc(sizeof(struct sfx) + 96) + 32 + 31) & ~31u);
         zero(s, sizeof(struct sfx));
         defaults(s);
         update(s);
-        s->self = s;
-        s->magic = SFX_MAGIC;
+        s->self = s; s->hself = s;
+        s->magic = SFX_MAGIC; s->head = SFX_MAGIC;
         SP->s = s;
         SP->magic = SFX_MAGIC;
     }
@@ -584,7 +603,7 @@ void sfx_msg(void *ctx, struct fw_ev *ev)
 unsigned sfx_process(void *obj, void *ctx)
 {
     seen(SEEN_PROC, 0, 0);
-    seen_why(why_not());
+    seen_why(diag());
     struct sfx *s = state();
     if (!s)
         return fw_reverb(obj, ctx);

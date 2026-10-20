@@ -356,23 +356,37 @@ static void ts_vis(void *page, unsigned off, int hide)
     ((void (*)(void *, int))(*(uint32_t **)w)[0x2c / 4])(w, hide);
 }
 /* on our sends Vol, Pan, Gain and CUE (knob and button) are hidden */
-static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_CUE_BTN };
+static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE_BTN };   /* (the CUE knob shows the M7 check) */
 static void ts_hide(void *page, int hide)
 {
     for (unsigned i = 0; i < sizeof TP_OTHERS / sizeof TP_OTHERS[0]; i++)
         ts_vis(page, TP_OTHERS[i], hide);
 }
 
-/* What the M7 has seen (src/sfx_m7.c writes it), shown as FX5's name on our sends: first a digit, 0 when the M7's
- * FX state is valid (else which check failed, 9 not checked yet), then a letter for each, a dash for what has not
- * happened: C = the graph built ours, P = the FX process called, S = the mixer's channels pass through us, M = one of
- * our settings arrived, I = a track's chorus or drive ran. "NONE" when the M7 has written nothing. */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why; };
+/* What the M7 has seen (src/sfx_m7.c writes it), shown in the knobs' names on our sends (a check on hardware):
+ * FX5: a digit (0 = the M7's FX state is valid; 7 = valid but its start was written over; else the check that
+ * failed, 9 not checked yet), then C = the graph built ours, P = the FX process called, S = the mixer's channels
+ * pass through us, M = one of our settings arrived, a dash where not. "NONE": the M7 has written nothing.
+ * Chorus: A + where our state is (address / 4096, hex). Drive: T + the M7's heap top (/ 4096). CUE: L + the M7's
+ * heap limit (/ 65536); OUT4 is hidden when OUT3/OUT4 are a stereo pair. */
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, limit; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)
 #define SEEN_MAGIC 0x32454553u
+static void name_hex(void *page, unsigned off, char c, uint32_t v, int digits)
+{
+    char *name = (char *)TP_KNOB(page, off) + 0xf8;
+    name[0] = c;
+    for (int i = 0; i < digits; i++) {
+        unsigned d = v >> (4 * (digits - 1 - i)) & 15;
+        name[1 + i] = (char)(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+    name[1 + digits] = 0;
+    TP_KNOB(page, off)[0x1f7] = 0;
+    fw_knob_name(TP_KNOB(page, off), 1);
+}
 static void ts_seen(void *page)
 {
-    static const char L[5] = { 'C', 'P', 'S', 'M', 'I' };
+    static const char L[4] = { 'C', 'P', 'S', 'M' };
     su_mode();                      /* backup SRAM on */
     char *name = (char *)TP_KNOB(page, TP_OUT3) + 0xf8;
     if (SEEN->magic != SEEN_MAGIC) {
@@ -380,9 +394,12 @@ static void ts_seen(void *page)
     } else {
         uint32_t bits = SEEN->bits, w = SEEN->why;
         name[0] = (char)('0' + (w > 9 ? 9 : w));
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 4; i++)
             name[1 + i] = bits >> i & 1 ? L[i] : '-';
-        name[6] = 0;
+        name[5] = 0;
+        name_hex(page, TP_FX1, 'A', SEEN->addr >> 12, 5);
+        name_hex(page, TP_FX2, 'T', SEEN->top >> 12, 5);
+        name_hex(page, TP_CUE, 'L', SEEN->limit >> 16, 4);
     }
     TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
     fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
