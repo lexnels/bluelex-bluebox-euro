@@ -422,6 +422,23 @@ strip(uc, x[:32], x[:32])
 check(bytes(uc.mem_read(p_, 0x200000)) == snap and strips[-1][1] == IN, "after a reset, before the graph is rebuilt: sfx_strip leaves the old state's memory alone")
 w32(uc, HEAP, top)
 
+# the M4 clears the M7's SDRAM heap at its boot, maybe after the graph is built: the state is set up again
+uc, node = setup()
+p_ = u32(uc, 0x38800FA4)
+tail = p_ + bytes(uc.mem_read(p_, size)).rindex(struct.pack("<II", 0x58464453, p_))
+uc.mem_write(p_ - 32, bytes(size + 64))
+run_ins(uc, node, x[:320], x[:320], [CHO(3)], ch=3)
+lw, _, _ = run_ins(uc, node, x, x, ch=3)
+fx = u32(uc, 0x38800FA8)
+wet = max(abs(a - b) for a, b in zip(lw[2400:], x[2400:]))
+check(fx == 1 and u32(uc, tail) == 0x58464453 and wet > 0.05 and u32(uc, 0x38800E60 + 24) == 1,
+      f"after the M4 clears the heap: the state set up again once (fixes {fx}), chorus on track 4 works (wet {wet:.3f})")
+uc.mem_write(p_ - 32, bytes(size + 64))
+for _ in range(10): block(uc, node, x[:32], x[:32])
+check(u32(uc, 0x38800FA8) == 2, "cleared again: set up again")
+w32(uc, 0x38800FA8, 8); uc.mem_write(p_ - 32, bytes(size + 64)); block(uc, node, x[:32], x[:32])
+check(u32(uc, 0x38800FA8) == 8 and u32(uc, tail) == 0, "no more than 8 times a boot")
+
 # worst case: four tracks with chorus and drive, the Rev Delay on
 uc, node = setup()
 pending.clear()
@@ -612,13 +629,13 @@ check(u32(uc, 0x38800FF4) == 1 and [(r[0] - PG, r[1]) for r in shown] == OTHERS,
 shown.clear(); w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_setup"], PG, 1)
 check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], "the stock half shows them all again")
 w32(uc, PG + 0xEBBC, 1); w32(uc, 0x38800FF4, 1); binds.clear(); shown.clear(); infos.clear()
-uc.mem_write(0x38800E60, struct.pack("<IIHHIIII", 0x32454553, 1 | 2 | 4, 0, 0, 0, 0xC07A1230, 0xC0B3F000, 0xC4000000))   # the M7: state valid, seen C, P, S
+uc.mem_write(0x38800E60, struct.pack("<IIHHIIII", 0x32454553, 1 | 2 | 4, 0, 0, 0, 0xC07A1230, 0xC0B3F000, 2))   # the M7: state valid, seen C, P, S
 w32(uc, 0x24030000, 0); uc.mem_write(0x24030004, struct.pack("<H", 3))
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
-      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "0CPS-", (cs(PG + 0xCF08 + 0xF8), cs(PG + 0xD2D8 + 0xF8), cs(PG + 0xD6A8 + 0xF8)) == ("AC07A1", "TC0B3F", "LC400") and f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
+      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "0CPS-", (cs(PG + 0xCF08 + 0xF8), cs(PG + 0xD2D8 + 0xF8), cs(PG + 0xD6A8 + 0xF8)) == ("AC07A1", "TC0B3F", "R2") and f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
 w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 check(binds == [], "stock half's fill untouched")

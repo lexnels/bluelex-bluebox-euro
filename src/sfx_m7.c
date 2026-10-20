@@ -106,11 +106,11 @@ struct sfx {
 };
 #define SFX_MAGIC 0x58464453u       /* "SDFX" */
 
-struct sfx_ptr { uint32_t magic; struct sfx *s; };
+struct sfx_ptr { uint32_t magic; struct sfx *s; uint32_t fixes; };
 #define SP ((volatile struct sfx_ptr *)0x38800fa0u)   /* own 32-byte line, M7 only */
 
 /* What the M7 has seen since boot, for the M4 to show on the track sends page (src/dly_m4.c): a check on hardware */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, limit; };
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, fixes; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)  /* own 32-byte line (free: dly_shared ends at 0xe5c) */
 #define SEEN_MAGIC 0x32454553u      /* "SEE2" */
 #define SEEN_CTOR  1u               /* sfx_ctor ran (the graph built) */
@@ -140,17 +140,16 @@ static void seen(uint32_t bit, unsigned ch, unsigned id)
     SCB_DCCMVAC = (uint32_t)SEEN;
     __asm__ volatile("dsb");
 }
-#define HEAP_LIMIT (*(volatile uint32_t *)0x24000000u)  /* FUN_080413d0's SDRAM limit */
-static void seen_why(uint32_t w)
+static void seen_why(uint32_t w, uint32_t fixes)
 {
-    uint32_t a = SP->s ? (uint32_t)SP->s : 0, top = HEAP_TOP, lim = HEAP_LIMIT;
-    if (SEEN->magic == SEEN_MAGIC && SEEN->why == w && SEEN->addr == a && SEEN->top == top && SEEN->limit == lim)
+    uint32_t a = SP->s ? (uint32_t)SP->s : 0, top = HEAP_TOP;
+    if (SEEN->magic == SEEN_MAGIC && SEEN->why == w && SEEN->addr == a && SEEN->top == top && SEEN->fixes == fixes)
         return;
     seen(0, 0, 0);                  /* (the line set up) */
     SEEN->why = w;
     SEEN->addr = a;
     SEEN->top = top;
-    SEEN->limit = lim;
+    SEEN->fixes = fixes;
     __asm__ volatile("dsb");
     SCB_DCCMVAC = (uint32_t)SEEN;
     __asm__ volatile("dsb");
@@ -278,6 +277,30 @@ static struct sfx *state(void)
     return why_not() ? 0 : SP->s;
 }
 
+static void fresh(struct sfx *s)
+{
+    zero(s, sizeof(struct sfx));
+    defaults(s);
+    update(s);
+    s->self = s; s->hself = s;
+    s->magic = SFX_MAGIC; s->head = SFX_MAGIC;
+}
+
+/* The M4 clears 0xc0000000..0xc3400000 (all of the M7's SDRAM heap) once at its boot (memset in its main, @0x0810d610),
+ * and the M7 may have built its graph by then: the stock objects there are only buffers, but ours (near the top, so
+ * the last to be cleared) loses its marks and settings (hardware, builds 15-19: both marks gone). So when the pointer
+ * is good but the marks are not, set it up again, a few times at most (once more if the clearing was still going on). */
+#define MAX_FIXES 8u
+static void repair(void)
+{
+    uint32_t w = why_not();
+    if ((w == 4 || w == 6) && SP->fixes < MAX_FIXES) {
+        PWR_CR1 |= 1u << 8;
+        fresh(SP->s);
+        SP->fixes++;
+    }
+}
+
 /* Replaces bl FUN_08052e30 @0x080518d2 (the delay's constructor, while the graph is built). */
 void *sfx_ctor(void *obj)
 {
@@ -294,13 +317,10 @@ void *sfx_ctor(void *obj)
          * a neighbour's cache maintenance (invalidating a DMA buffer next to us) would throw away our writes to a
          * shared line (build 18 on hardware: the state's first bytes lost) */
         s = (struct sfx *)((fw_alloc(sizeof(struct sfx) + 96) + 32 + 31) & ~31u);
-        zero(s, sizeof(struct sfx));
-        defaults(s);
-        update(s);
-        s->self = s; s->hself = s;
-        s->magic = SFX_MAGIC; s->head = SFX_MAGIC;
+        fresh(s);
         SP->s = s;
         SP->magic = SFX_MAGIC;
+        SP->fixes = 0;
     }
     seen(SEEN_CTOR, 0, 0);
     return r;
@@ -603,7 +623,8 @@ void sfx_msg(void *ctx, struct fw_ev *ev)
 unsigned sfx_process(void *obj, void *ctx)
 {
     seen(SEEN_PROC, 0, 0);
-    seen_why(diag());
+    repair();
+    seen_why(diag(), SP->fixes);
     struct sfx *s = state();
     if (!s)
         return fw_reverb(obj, ctx);

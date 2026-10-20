@@ -369,7 +369,7 @@ static void ts_hide(void *page, int hide)
  * pass through us, M = one of our settings arrived, a dash where not. "NONE": the M7 has written nothing.
  * Chorus: A + where our state is (address / 4096, hex). Drive: T + the M7's heap top (/ 4096). CUE: L + the M7's
  * heap limit (/ 65536); OUT4 is hidden when OUT3/OUT4 are a stereo pair. */
-struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, limit; };
+struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, fixes; };
 #define SEEN ((volatile struct sfx_seen *)0x38800e60u)
 #define SEEN_MAGIC 0x32454553u
 static void name_hex(void *page, unsigned off, char c, uint32_t v, int digits)
@@ -399,7 +399,7 @@ static void ts_seen(void *page)
         name[5] = 0;
         name_hex(page, TP_FX1, 'A', SEEN->addr >> 12, 5);
         name_hex(page, TP_FX2, 'T', SEEN->top >> 12, 5);
-        name_hex(page, TP_CUE, 'L', SEEN->limit >> 16, 4);
+        name_hex(page, TP_CUE, 'R', SEEN->fixes, 1);   /* times the M7 set its state up again */
     }
     TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
     fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
