@@ -57,6 +57,10 @@ PATCHES = [
     (0x081342F4, bl(0x081342F4, 0x081339B0), bl(0x081342F4, s4["ts_tp_fill"])),
     (0x08134316, bl(0x08134316, 0x081339B0), bl(0x08134316, s4["ts_tp_fill"])),
     (0x08134360, bl(0x08134360, 0x08128D9C), bl(0x08134360, s4["ts_tp_turn"])),
+    # M4: the channel sends' labels (their param defs; the strings' only users are the literals @0x08136144/0x0813614c):
+    # FX1 -> DEL, FX2 -> REV
+    (0x08149750, b"FX1:\0", b"DEL:\0"),
+    (0x08149760, b"FX2:\0", b"REV:\0"),
 ]
 if os.environ.get("SFX_NO_TRACK_PAGE"):     # a diagnostic build: the sends without the track screen page
     PATCHES = [p for p in PATCHES if p[0] not in (0x08124758, 0x0812474C, 0x08135720, 0x081342D8, 0x081342F4, 0x08134316, 0x08134360)]

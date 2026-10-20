@@ -485,7 +485,7 @@ uc.reg_write(UC_ARM_REG_SP, sp); uc.reg_write(UC_ARM_REG_LR, RET | 1)
 uc.emu_start(s4["dly_defs"] | 1, RET, count=1_000_000)
 ours = {d[0]: d for d in defs if d[0] in ids.values()}
 TS = {ids["TS_CHO"], ids["TS_DRV"], ids["TS_D2"]}
-check([ours[ids[k]][1:5] for k in ("TS_CHO", "TS_DRV", "TS_D2")] == [(8, "Chorus:", 0, 1000), (8, "Drive:", 0, 1000), (8, "FX5:", 0, 1000)],
+check([ours[ids[k]][1:5] for k in ("TS_CHO", "TS_DRV", "TS_D2")] == [(8, "Chorus:", 0, 1000), (8, "Drive:", 0, 1000), (8, "RDEL:", 0, 1000)],
       "M4: per track Chorus and Drive amounts, FX5 (like FX1: type 8, 0..1000)")
 print("     " + ", ".join(f"{d[2]}{d[5]}" for d in ours.values()))
 lists = {d[0]: d for d in ldefs if d[0] in ids.values()}
@@ -634,7 +634,7 @@ call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
-      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "FX5", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
+      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "RDEL", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
 w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 check(binds == [], "stock half's fill untouched")

@@ -53,7 +53,7 @@ void dly_defs(void *table, unsigned id, unsigned type, const char *label, int mi
     /* per track: chorus and drive inserts, the Rev Delay send (type 8 0..1000 like FX1 0xda) */
     fw_def(table, SFX_TS_CHO, KNOB, "Chorus:", 0, 1000, "chorus_amount");
     fw_def(table, SFX_TS_DRV, KNOB, "Drive:", 0, 1000, "drive_amount");
-    fw_def(table, SFX_TS_D2, KNOB, "FX5:", 0, 1000, "delay2_send");
+    fw_def(table, SFX_TS_D2, KNOB, "RDEL:", 0, 1000, "delay2_send");
     sfx_reset();                    /* at boot the FX button starts from the reverb itself */
 }
 
@@ -406,7 +406,7 @@ void ts_tp_fill(void *page, void *arg)
     bind(page, TP_OUT3, slot, SFX_TS_D2);
     /* OUT3's name is its own text (+0xf8: "OUT3" or "OUT3&4", set after the bind), not the param's */
     char *name = (char *)TP_KNOB(page, TP_OUT3) + 0xf8;
-    name[0] = 'F'; name[1] = 'X'; name[2] = '5'; name[3] = 0;
+    name[0] = 'R'; name[1] = 'D'; name[2] = 'E'; name[3] = 'L'; name[4] = 0;
     TP_KNOB(page, TP_OUT3)[0x1f7] = 0;
     fw_knob_name(TP_KNOB(page, TP_OUT3), 1);
     ts_hide(page, 1);
