@@ -604,7 +604,7 @@ VT, HIDE = 0x20001000, 0x20001100                 # a fake widget vtable: slot 0
 uc.mem_write(VT + 0x2C, struct.pack("<I", HIDE | 1)); uc.mem_write(HIDE, b"\x70\x47")
 stub(uc, HIDE, shown); stub(uc, 0x081288FC)
 for off in (0xC398, 0xC768, 0xCB38, 0xCF08, 0xD2D8, 0xD6A8, 0xDA78, 0xDE48, 0xE814): w32(uc, PG + off, VT)
-OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xE814, 1)]
+OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xE814, 1), (0xDE48, 1)]
 stub(uc, 0x08128D9C, turns)
 def press_track():
     """the track button as the dispatcher handles it (our two hooks), then the screen's setup (event 0x8c)"""
@@ -625,17 +625,16 @@ check(u32(uc, 0x38800FF4) == 0, "the track screen shown any other way (flag left
 w32(uc, 0x38800FF4, 2); shown.clear()
 call(uc, s4["ts_tp_setup"], PG, 1)
 check(u32(uc, 0x38800FF4) == 1 and [(r[0] - PG, r[1]) for r in shown] == OTHERS,
-      f"our sends' setup: Vol, Pan, Gain, the CUE button hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
+      f"our sends' setup: Vol, Pan, Gain, CUE (knob and button), OUT4 hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
 shown.clear(); w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_setup"], PG, 1)
 check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], "the stock half shows them all again")
 w32(uc, PG + 0xEBBC, 1); w32(uc, 0x38800FF4, 1); binds.clear(); shown.clear(); infos.clear()
-uc.mem_write(0x38800E60, struct.pack("<IIHHIIII", 0x32454553, 1 | 2 | 4, 0, 0, 0, 0xC07A1230, 0xC0B3F000, 2))   # the M7: state valid, seen C, P, S
 w32(uc, 0x24030000, 0); uc.mem_write(0x24030004, struct.pack("<H", 3))
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 got = [(r[0] - PG, r[1], r[2], r[3]) for r in binds]
 check(got == [(0xCF08, ids["TS_CHO"], 300 + ids["TS_CHO"], 0), (0xD2D8, ids["TS_DRV"], 300 + ids["TS_DRV"], 0), (0xDA78, ids["TS_D2"], 300 + ids["TS_D2"], 0)]
       and infos[:3] == [(3, ids["TS_CHO"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_DRV"], b"\x01\x00\x00\x01\x00"), (3, ids["TS_D2"], b"\x01\x00\x00\x01\x00")]
-      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "0CPS-", (cs(PG + 0xCF08 + 0xF8), cs(PG + 0xD2D8 + 0xF8), cs(PG + 0xD6A8 + 0xF8)) == ("AC07A1", "TC0B3F", "R2") and f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
+      and [(r[0] - PG, r[1]) for r in shown] == OTHERS and cs(PG + 0xDA78 + 0xF8) == "FX5", f"our sends' fill: FX1, FX2, OUT3 knobs bound to FX3, FX4, FX5 of track 4 ({[(hex(g[0]), hex(g[1]), g[2]) for g in got]})")
 w32(uc, 0x38800FF4, 0); binds.clear()
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
 check(binds == [], "stock half's fill untouched")
