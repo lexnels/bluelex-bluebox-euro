@@ -18,7 +18,7 @@
  *   dly_read     replaces the line reads: the stock read (its glide after a time change is kept), then re-reads the
  *                same line a variable amount further back (or nearer the write head):
  *                - drift (the old Flutter, still id 0x3a): a slowly wobbling, wandering extra delay while the line
- *                  is steady, like tape (up to 16 ms, about +-2.5 % pitch);
+ *                  plays, like tape (up to 16 ms, about +-2.5 % pitch);
  *                - pitch: plain resampling, like changing tape speed: the read slides through the line at the pitch
  *                  ratio and jumps back every delay time (at most 100 ms), with a 5 ms crossfade. No grains or
  *                  windows beyond that splice, so going up repeats a little and going down skips a little. Each pass
@@ -56,11 +56,12 @@ struct dly_shared {
     float stash[2][D_MAXN];
     float p_ratio, p_ratio2;     /* 2^(semitones/12), and squared for PING's line C; 1 = off */
     float p_ph[6];               /* per line: samples since its last jump */
+    float fl_amt;                /* drift's depth (samples), gliding to the knob's */
 };
 #define DS ((struct dly_shared *)0x38800d00u)   /* after hall_shared, before the CPU meter at 0xf00 */
-#define DS_MAGIC 0x44454c5bu
+#define DS_MAGIC 0x44454c5cu   /* (changed with the layout: fl_amt added) */
 _Static_assert(sizeof(struct hall_shared) <= 0xd00, "hall state below the delay state");
-_Static_assert(0xd00 + sizeof(struct dly_shared) <= 0xf00, "delay state below the CPU meter");
+_Static_assert(0xd00 + sizeof(struct dly_shared) <= 0xe60, "delay state below the send FX check (src/sfx_m7.c, 0xe60)");
 
 static struct dly_shared *dly_state(void)
 {
@@ -97,14 +98,17 @@ static void dly_prepare(struct dly_shared *d, unsigned n)
      * (about +-2.5 % pitch at full) */
     float depth = rv_clamp((float)d->flutter * 1e-3f, 0.f, 1.f);
     float fa = depth * 0.008f * D_FS;
+    /* the depth glides (~0.5 s), so turning Drift on, off or to another amount bends the pitch for a moment
+     * instead of jumping the read (a jump of up to 16 ms in one block was a pop on hardware) */
+    d->fl_amt += (fa - d->fl_amt) * ((float)n * (1.f / (0.5f * D_FS)));
+    if (fa <= 0.f && d->fl_amt < 0.01f) d->fl_amt = 0.f;
     d->fl_ph += 0.6f * (float)n / D_FS;
     if (d->fl_ph >= 1.f) d->fl_ph -= 1.f;
     if ((d->fl_count++ & 511u) == 0) d->fl_target = d_rand(d);          /* a new wander target every ~0.34 s */
     d->fl_noise += (d->fl_target - d->fl_noise) * 0.004f;
     float s = d_sin(d->fl_ph * 6.2831853f - 3.1415927f);
     d->m0 = d->m1;
-    d->m1 = fa > 0.f ? fa * (1.f + 0.6f * s + 0.4f * d->fl_noise) : 0.f;
-    if (d->m0 <= 0.f && d->m1 > 0.f) d->m0 = d->m1;                   /* drift just turned on: no jump from 0 */
+    d->m1 = d->fl_amt * (1.f + 0.6f * s + 0.4f * d->fl_noise);
 
     int st = d->pitch_on ? d->pitch : 0;
     if (st < -12) st = -12;
@@ -129,6 +133,7 @@ void dly_read(uint32_t *line, void *bus, int ch)
 {
     uint32_t wr = line[1], rd0 = line[2], len = line[4], size = line[5];
     uint32_t dist = wr >= rd0 ? wr - rd0 : wr + size - rd0;
+    float frac0 = *(float *)&line[3];
     fw_line_read(line, bus, ch);
     struct dly_shared *d = DS;
     if (d->magic != DS_MAGIC || !d->obj)
@@ -150,7 +155,18 @@ void dly_read(uint32_t *line, void *bus, int ch)
     if (hi < 0.f) hi = 0.f;
     if (lo > 0.f) lo = 0.f;
 
-    int flutter = dist == len && (d->m0 > 0.f || d->m1 > 0.f);
+    /* After a time change (dist != len) the stock read glides: it steps (dist - len + n) / n samples a sample
+     * (0.5 .. 2), from a fraction it keeps at line[3] (FUN_08059d54). Our reads follow the same path (gl), so drift
+     * and pitch carry on through a glide. (Drift used to stop there instead: a jump of up to 16 ms in the read, a
+     * pop each time the stock read moved, from a time change or a tempo nudge with BEAT on, carried on by the
+     * feedback.) */
+    float sp = 1.f, f0 = 0.f;
+    if (dist != len && n) {
+        sp = ((float)dist - (float)len + (float)n) / (float)n;
+        sp = sp < 0.5f ? 0.5f : sp > 2.f ? 2.f : sp;
+        f0 = frac0;
+    }
+    int flutter = d->m0 > 0.f || d->m1 > 0.f;
     uint8_t *obj = d->obj;
     float ratio = li == 2 && obj[0x274] && !obj[0x276] ? d->p_ratio2 : d->p_ratio;
     /* the read slides by (1 - ratio) per sample and jumps back every P samples: P is the delay time, at most 100 ms
@@ -168,11 +184,12 @@ void dly_read(uint32_t *line, void *bus, int ch)
     if (!pitch) ph = 0.f;
     if (ph >= P) ph = 0.f;
     for (unsigned i = 0; i < n; i++, m += dm) {
-        float a = rv_clamp(m + k * ph, lo, hi);
+        float gl = f0 + (float)i * (sp - 1.f);   /* the stock read's lead on rd0 + i */
+        float a = rv_clamp(m + k * ph - gl, lo, hi);
         float y = d_tap(buf, size, rd0 + i, a);
         if (ph > P - P_FADE) {               /* crossfade into the read after the jump */
             float g = (ph - (P - P_FADE)) * (1.f / P_FADE);
-            float b = rv_clamp(m + k * (ph - P), lo, hi);
+            float b = rv_clamp(m + k * (ph - P) - gl, lo, hi);
             y += (d_tap(buf, size, rd0 + i, b) - y) * g;
         }
         out[i] = y;

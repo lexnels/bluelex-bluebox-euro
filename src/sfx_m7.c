@@ -82,7 +82,7 @@ struct sfx {
     /* params, as the M4 sends them */
     int32_t cho_mode, cho_rate, cho_depth, cho_width;
     int32_t drv_drive, drv_tone, drv_level;
-    int32_t d2_on, d2_fx1, d2_fx2, d2_time, d2_fb, d2_tone, d2_ping, d2_level, d2_beat, d2_sync, d2_rev, d2_drift;
+    int32_t d2_on, d2_fx1, d2_fx2, d2_time, d2_fb, d2_cut, d2_wid, d2_filt, d2_ping, d2_level, d2_beat, d2_sync, d2_rev, d2_drift;
     float bpm;                                                  /* the tempo d2_tgt was worked out for */
     /* per track: chorus and drive amounts (0..1, off at 0), Rev Delay send (0..1) */
     float tc_amt[NCH], td_amt[NCH], ts_d2[NCH];
@@ -94,8 +94,12 @@ struct sfx {
     float cho_inc, cho_ctr, cho_dep, cho_w;
     float drv_gain, drv_k, drv_lp, drv_g2;
     /* delay 2 */
-    float d2_cur, d2_tgt, d2_fbg, d2_lp, d2_g, d2_gt;
-    float d2_lpl, d2_lpr, d2_hpl[2], d2_hpr[2];
+    float d2_cur, d2_tgt, d2_fbg, d2_g, d2_gt;
+    float d2_hpl[2], d2_hpr[2];
+    float d2_cs, d2_ws, d2_fg;                                  /* Cutoff, Width (0..1) and FILT (0..1), gliding */
+    float d2_b0, d2_a1, d2_a2;                                  /* the band-pass: b0 (b1 = 0, b2 = -b0), -a1, -a2 */
+    float d2_bpl[4], d2_bpr[4];                                 /* its x1, x2, y1, y2 per side */
+    float d2_damt;                                              /* Drift's depth (samples), gliding to the knob's */
     uint32_t d2_wp, d2_clear;
     uint32_t d2_seg, d2_j, d2_T, d2_rng, d2_isrev;              /* Reverse: this repeat's length, where in it, backwards? */
     float d2_dph, d2_dnoise, d2_dtgt, d2_dm;                    /* Drift: LFO phase, wander, its target, extra delay */
@@ -211,7 +215,7 @@ static void defaults(struct sfx *s)
         s->slot_of[c] = -1;
     for (unsigned j = 0; j < NSLOT; j++)
         s->ins[j].ch = -1;
-    s->d2_on = 0; s->d2_fx1 = 0; s->d2_fx2 = 0; s->d2_time = 700; s->d2_fb = 400; s->d2_tone = 600; s->d2_ping = 0; s->d2_level = 700;
+    s->d2_on = 0; s->d2_fx1 = 0; s->d2_fx2 = 0; s->d2_time = 700; s->d2_fb = 400; s->d2_cut = 120; s->d2_wid = 1000; s->d2_filt = 1; s->d2_ping = 0; s->d2_level = 700;
     s->d2_beat = 0; s->d2_sync = 8; s->d2_rev = 0; s->d2_drift = 0;
     s->bpm = 120.f;
 }
@@ -247,7 +251,6 @@ static void update(struct sfx *s)
         s->d2_tgt = 10.f * exp2f_(7.643856f * s->d2_time * 0.001f) * FS * 0.001f;  /* 10 ms * 200^t */
     if (s->d2_tgt > (float)(D2_N - 4 - 1024)) s->d2_tgt = (float)(D2_N - 4 - 1024);   /* (room for Drift's 16 ms) */
     s->d2_fbg = s->d2_fb * 0.00098f;                                  /* up to 0.98 */
-    s->d2_lp = lp_coef(800.f * exp2f_(4.5f * s->d2_tone * 0.001f));   /* 800 Hz .. 18 kHz in the loop */
     s->d2_gt = s->d2_on ? 1.f : 0.f;
 }
 
@@ -345,7 +348,9 @@ static int set(struct sfx *s, unsigned id, int32_t v)
     case SFX_D2_FX2: s->d2_fx2 = v; break;
     case SFX_D2_TIME: s->d2_time = v; break;
     case SFX_D2_FB: s->d2_fb = v; break;
-    case SFX_D2_TONE: s->d2_tone = v; break;
+    case SFX_D2_CUT: s->d2_cut = v; break;
+    case SFX_D2_WID: s->d2_wid = v; break;
+    case SFX_D2_FILT: s->d2_filt = v; break;
     case SFX_D2_PING: s->d2_ping = v; break;
     case SFX_D2_LEVEL: s->d2_level = v; break;
     case SFX_D2_BEAT: s->d2_beat = v; break;
@@ -487,13 +492,47 @@ static float d2_read(const int16_t *line, uint32_t wp, float d)
     return (x0 + f * (x1 - x0)) * (1.f / 32767.f);
 }
 
+static float sin_(float x)          /* |x| <= pi */
+{
+    float x2 = x * x;
+    return x * (1.f - x2 / 6.f * (1.f - x2 / 20.f * (1.f - x2 / 42.f * (1.f - x2 / 72.f * (1.f - x2 / 110.f)))));
+}
+/* Cutoff and Width as the FX1 delay's band-pass (FUN_08056d2c, measured on its coefficients): the centre at
+ * 80 Hz * 128^c (80 Hz .. 10.24 kHz), a bandwidth of 0.5 * 16^w octaves (0.5 .. 8), RBJ's constant 0 dB peak
+ * band-pass. Their knobs glide (~30 ms), the coefficients follow once a block. */
+static void d2_filter(struct sfx *s, unsigned n)
+{
+    float c = (float)(s->d2_cut < 0 ? 0 : s->d2_cut > 1000 ? 1000 : s->d2_cut) * 0.001f;
+    float w = (float)(s->d2_wid < 0 ? 0 : s->d2_wid > 1000 ? 1000 : s->d2_wid) * 0.001f;
+    float k = (float)n * (1.f / (0.03f * FS));
+    if (s->d2_b0 == 0.f) {                      /* (the first block: straight there) */
+        s->d2_cs = c; s->d2_ws = w;
+    } else if (s->d2_cs == c && s->d2_ws == w)
+        return;
+    else {
+        s->d2_cs += (c - s->d2_cs) * k; s->d2_ws += (w - s->d2_ws) * k;
+        if (s->d2_cs - c < 1e-4f && c - s->d2_cs < 1e-4f) s->d2_cs = c;
+        if (s->d2_ws - w < 1e-4f && w - s->d2_ws < 1e-4f) s->d2_ws = w;
+    }
+    float w0 = TWO_PI * 80.f * exp2f_(7.f * s->d2_cs) / FS;
+    float sn = sin_(w0), cs = sin_(w0 + 1.5707963f - (w0 > 1.5707963f ? 3.1415927f : 0.f)) * (w0 > 1.5707963f ? -1.f : 1.f);
+    float y = 0.34657359f * 0.5f * exp2f_(4.f * s->d2_ws) * w0 / sn;   /* ln 2 / 2 x octaves x w0 / sin w0 */
+    float e = exp2f_(y * 1.4426950f);
+    float al = sn * 0.5f * (e - 1.f / e);       /* sin w0 * sinh y */
+    float a0 = 1.f / (1.f + al);
+    s->d2_b0 = al * a0;
+    s->d2_a1 = 2.f * cs * a0;
+    s->d2_a2 = -(1.f - al) * a0;
+}
+
 static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, float *wr_, unsigned n)
 {
     if (s->d2_clear < D2_N) {           /* switching on: clear the lines first (a few ms, silent) */
         zero(s->d2_l + s->d2_clear, D2_CLEAR * 2);
         zero(s->d2_r + s->d2_clear, D2_CLEAR * 2);
         s->d2_clear += D2_CLEAR;
-        s->d2_lpl = s->d2_lpr = 0.f;
+        zero(s->d2_bpl, sizeof s->d2_bpl);
+        zero(s->d2_bpr, sizeof s->d2_bpr);
         s->d2_hpl[0] = s->d2_hpl[1] = s->d2_hpr[0] = s->d2_hpr[1] = 0.f;
         s->d2_cur = s->d2_tgt;
         zero(wl_, n * 4);
@@ -501,7 +540,10 @@ static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, 
         return;
     }
     const float send = 1.f;
-    float fb = s->d2_fbg, a = s->d2_lp, cur = s->d2_cur;
+    float fb = s->d2_fbg, cur = s->d2_cur;
+    d2_filter(s, n);
+    float b0 = s->d2_b0, a1 = s->d2_a1, a2 = s->d2_a2, fg = s->d2_fg, dfg = ((s->d2_filt ? 1.f : 0.f) - fg) / (float)n;
+    float *bl = s->d2_bpl, *br = s->d2_bpr;
     uint32_t wp = s->d2_wp;
     int ping = s->d2_ping;
     /* Reverse: time is cut into repeats of one delay time each; at each repeat's start a die (xorshift) decides
@@ -514,6 +556,11 @@ static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, 
      * about +-2.5 % pitch at full), ramped across the block */
     float depth = s->d2_drift <= 0 ? 0.f : s->d2_drift >= 1000 ? 1.f : (float)s->d2_drift * 1e-3f;
     float fa = depth * 0.008f * FS, m0 = s->d2_dm, m1 = 0.f;
+    /* the depth glides (~0.5 s): turning Drift on, off or to another amount bends the pitch for a moment instead of
+     * jumping the read (up to 16 ms in one block: a pop, on hardware) */
+    s->d2_damt += (fa - s->d2_damt) * ((float)n * (1.f / (0.5f * FS)));
+    if (fa <= 0.f && s->d2_damt < 0.01f) s->d2_damt = 0.f;
+    fa = s->d2_damt;
     if (fa > 0.f) {
         s->d2_dph += 0.6f * (float)n / FS;
         if (s->d2_dph >= 1.f) s->d2_dph -= 1.f;
@@ -525,7 +572,6 @@ static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, 
         float x = 2.f * s->d2_dph - 1.f;                /* a parabolic sine over the phase */
         float sn = 4.f * x * (1.f - (x < 0.f ? -x : x));
         m1 = fa * (1.f + 0.6f * sn + 0.4f * s->d2_dnoise);
-        if (m0 <= 0.f) m0 = m1;                         /* just turned on: no jump from 0 */
     }
     float dm = (m1 - m0) / (float)n, m = m0;
     s->d2_dm = m1;
@@ -551,12 +597,18 @@ static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, 
             wr += g * (rr - wr);
         }
         j++;
-        s->d2_lpl += a * (wl - s->d2_lpl);
-        s->d2_lpr += a * (wr - s->d2_lpr);
-        float fl = s->d2_lpl - s->d2_hpl[0] + 0.99f * s->d2_hpl[1];   /* ~80 Hz high-pass in the loop */
-        s->d2_hpl[0] = s->d2_lpl; s->d2_hpl[1] = fl;
-        float fr = s->d2_lpr - s->d2_hpr[0] + 0.99f * s->d2_hpr[1];
-        s->d2_hpr[0] = s->d2_lpr; s->d2_hpr[1] = fr;
+        /* FILT on: the band-pass, as the FX1 delay's, on the output and in the loop; off: the read as it is out, an
+         * ~80 Hz high-pass in the loop (no rumble building up). Both run, crossfaded as FILT switches (no click) */
+        float ul = wl - s->d2_hpl[0] + 0.99f * s->d2_hpl[1];
+        s->d2_hpl[0] = wl; s->d2_hpl[1] = ul;
+        float ur = wr - s->d2_hpr[0] + 0.99f * s->d2_hpr[1];
+        s->d2_hpr[0] = wr; s->d2_hpr[1] = ur;
+        float yl = b0 * (wl - bl[1]) + a1 * bl[2] + a2 * bl[3];
+        bl[1] = bl[0]; bl[0] = wl; bl[3] = bl[2]; bl[2] = yl;
+        float yr = b0 * (wr - br[1]) + a1 * br[2] + a2 * br[3];
+        br[1] = br[0]; br[0] = wr; br[3] = br[2]; br[2] = yr;
+        fg += dfg;
+        float fl = ul + fg * (yl - ul), fr = ur + fg * (yr - ur);
         float xl, xr;
         if (ping) {                                     /* mono in on the left, then left <-> right */
             xl = (il[i] + ir[i]) * 0.5f * send + fb * fr;
@@ -568,9 +620,10 @@ static void delay2(struct sfx *s, const float *il, const float *ir, float *wl_, 
         s->d2_l[wp] = (int16_t)(sat(xl) * 32767.f);
         s->d2_r[wp] = (int16_t)(sat(xr) * 32767.f);
         wp = (wp + 1) & (D2_N - 1);
-        wl_[i] = wl;
-        wr_[i] = wr;
+        wl_[i] = wl + fg * (yl - wl);
+        wr_[i] = wr + fg * (yr - wr);
     }
+    s->d2_fg = fg;
     s->d2_cur = cur; s->d2_wp = wp;
     s->d2_seg = seg; s->d2_j = j; s->d2_T = T; s->d2_isrev = rev; s->d2_rng = rng;
 }
@@ -601,7 +654,7 @@ static void out(const struct dest *d, float *g, float gt, int32_t level, int32_t
  */
 void sfx_msg(void *ctx, struct fw_ev *ev)
 {
-    if (ev->type == 0x39 && ev->id >= SFX_CHO_MODE && ev->id <= SFX_D2_DRIFT)   /* (our ids' range) */
+    if (ev->type == 0x39 && ev->id >= SFX_D2_CUT && ev->id <= SFX_D2_DRIFT)   /* (our ids' range) */
         seen(SEEN_MSG, ev->target, ev->id);
     if (ev->type == 0x39) {
         struct sfx *s = state();

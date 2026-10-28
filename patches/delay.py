@@ -57,8 +57,9 @@ PATCHES = [
     # reverb's paging instead (beq to the 0x15 branch)
     (0x0812BF90, bytes.fromhex("02d0"), bytes.fromhex("06d0")),
     (0x0812BFCE, bytes.fromhex("02d0"), bytes.fromhex("06d0")),
-    # M4: populate hides widgets past the 10th in compact mode (cmp.w r9,#9; bls): past the 12th (#11) instead
-    (0x0812BEDE, bytes.fromhex("b9f1090f"), bytes.fromhex("b9f10b0f")),
+    # M4: populate hides widgets past the 10th in compact mode (cmp.w r9,#9; bls): past the 13th (#12) instead (the
+    # delay has 12, the send FX's Rev Delay 13; the panel has 16 of each kind)
+    (0x0812BEDE, bytes.fromhex("b9f1090f"), bytes.fromhex("b9f10c0f")),
     # M4: the panel's calls to populate and layout -> our wrappers, which then place the delay's widgets
     *[(a, bl(a, 0x0812BC60), bl(a, s4["dly_populate"])) for a in (0x0812C086, 0x0812C554, 0x0812C59A)],
     (0x0812C544, bl(0x0812C544, 0x0812C110), bl(0x0812C544, s4["dly_layout"])),

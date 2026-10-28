@@ -129,7 +129,7 @@ r, _, _ = block([0.0] * N, [0.0] * N)
 check(calls["process"] == 1 and r == 1, "stock style: hall_process runs the stock engine")
 # the delay's Send to Reverb (src/dly_m7.h): last block's kept wet signal is added to the reverb's bus first
 DS, STASH_N = 0x38800D00, 56             # struct dly_shared: magic, obj, 4 ints, 5 floats, 2 u32, send_g, then stash_n
-uc.mem_write(DS, struct.pack("<I", 0x44454C5B)); uc.mem_write(DS + STASH_N, struct.pack("<I", N))
+uc.mem_write(DS, struct.pack("<I", 0x44454C5C)); uc.mem_write(DS + STASH_N, struct.pack("<I", N))
 uc.mem_write(DS + STASH_N + 4, struct.pack(f"<{N}f", *[0.25] * N) + struct.pack(f"<{N}f", *[-0.5] * N))
 _, l, rr = block([0.1] * N, [0.1] * N)
 check(all(abs(x - 0.35) < 1e-6 for x in l) and all(abs(x + 0.4) < 1e-6 for x in rr) and rd(uc, DS + STASH_N, "<I")[0] == 0,

@@ -119,7 +119,7 @@ def shown():                                                     # widget -> (kn
                 x, y, _, _ = rects[w]; out[i] = (kind, (x - X0) // 0x30 - 1, 0 if y == Y0 + 0x2D else 1)
     return out
 SLOT = 0x24037000; uc.mem_write(SLOT, struct.pack("<h", 0x14))
-check(data[0x0812BEDE - 0x08100000 + 0xC0000:][:4] == bytes.fromhex("b9f10b0f"), "M4 panel: populate shows up to 12 widgets")
+check(data[0x0812BEDE - 0x08100000 + 0xC0000:][:4] == bytes.fromhex("b9f10c0f"), "M4 panel: populate shows up to 13 widgets")
 call(0x0812C110 | 1, P)                                          # (stand-in) stock layout first: everything stock
 layout[:] = [1] * 7 + [2] * 5                                    # the delay in 3&4 mode: 7 knobs, 5 buttons
 moves.clear(); n0 = populated[0]
@@ -257,6 +257,22 @@ m1, dev1 = crossings(out[24000:])
 print(f"     1 kHz period {m0:.3f} samples, wobble {dev0 / m0 * 100:.3f} % without drift, {dev1 / m1 * 100:.3f} % with")
 check(dev0 / m0 < 0.0005 and 0.015 < dev1 / m1 < 0.04, "Drift bends the pitch clearly but slowly (1.5 to 4 %)")
 check(all(math.isfinite(x) and abs(x) < 1.5 for x in out), "Drift: output stays clean")
+
+# Drift, no pops: turning it on, to another amount and off glides, and it keeps going through the stock read's glide
+# after a time change (it used to stop there: a jump in the read). A 100 Hz sine moves at most 0.013 a sample
+low = lambda t: 0.5 * math.sin(2 * math.pi * 100 * t / 48000)
+def jump(x): return max(abs(x[i] - x[i - 1]) for i in range(1, len(x)))
+events([(0x3A, 0), (0x39, 500), (0x36, 0)]); run(low, 48000 // N)
+js = []
+for dv in (700, 300, 0):
+    events([(0x3A, dv)]); js.append(jump(run(low, 48000 // N)))
+events([(0x3A, 700)]); run(low, 48000 // N)
+jt = []
+for tv in (20, 10):
+    events([(0x33, tv)]); jt.append(jump(run(low, 2 * 48000 // N)))
+print(f"     Drift on / 300 / off: biggest step {max(js):.4f}; Delay 10 -> 20 -> 10 with Drift: {max(jt):.4f}")
+check(max(js) < 0.03 and max(jt) < 0.03, "Drift: no jumps turning it on, changing it, turning it off, or through a time change")
+events([(0x3A, 0), (0x39, 0)]); run(lambda t: 0.0, 2 * 48000 // N)
 
 # cost: our additions on top of the stock body, with everything on
 icount = {"n": 0}

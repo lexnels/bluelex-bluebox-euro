@@ -2,7 +2,8 @@
  * Undefined in both cores' param tables and handled by no stock node. They live in the reverb slot's param set, so
  * the M4 sends them with slot 0x15; src/sfx_m7.c takes them before the M7's dispatcher (the stock reverb setter would
  * ignore ids outside 0x13d..0x15c anyway). 0x44, 0x45, 0x47, 0x48, 0x49, 0x56, 0x57 were the chorus's and drive's
- * On, Level and FX1/FX2 Send while they were send FX (builds up to 14): not used now. */
+ * On, Level and FX1/FX2 Send while they were send FX (builds up to 14); 0x44, 0x45, 0x47 are the Rev Delay's filter
+ * now (keys of their own). 0x53 was its Tone (builds up to 22): not used now. */
 #define SFX_CHO_MODE  0x46          /* a list: 0 = I, 1 = II, 2 = I+II */
 #define SFX_DRV_DRIVE 0x4c
 #define SFX_DRV_TONE  0x4d
@@ -11,7 +12,9 @@
 #define SFX_D2_FX1    0x50
 #define SFX_D2_TIME   0x51          /* 0..1000: 10 ms * 200^(v / 1000), so 10 ms .. 2 s */
 #define SFX_D2_FB     0x52
-#define SFX_D2_TONE   0x53
+#define SFX_D2_CUT    0x44          /* Cutoff, Width, FILT: as the FX1 delay's band-pass (its 0x0e, 0xcb, 0xca) */
+#define SFX_D2_WID    0x45
+#define SFX_D2_FILT   0x47
 #define SFX_D2_PING   0x54
 #define SFX_D2_LEVEL  0x55
 #define SFX_D2_FX2    0x58
