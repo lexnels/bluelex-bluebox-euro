@@ -89,7 +89,7 @@ check(lists[:1] == [(0x59, "USB Out:", ["Multichannel", "Master only"], "usbout"
 added = []
 stub(uc, 0x081205E2, added)
 call(uc, d4["mst_set_add"], 0x24033000, 0x162, 0)
-check([(a[1], a[2]) for a in added] == [(0x162, 0), (0x43, 0), (0x59, 0)], "M4: global set gets Saturate and USB Out (default Multichannel)")
+check([(a[1], a[2]) for a in added] == [(0x162, 0), (0x43, 0), (0x59, 0), (0x48, 0)], "M4: global set gets Saturate, USB Out (default Multichannel) and OUT 1/2 (Master)")
 
 # ---- M7: the setting arrives with the master compressor's events (src/mst_m7.c)
 def comp_with_events(evs):

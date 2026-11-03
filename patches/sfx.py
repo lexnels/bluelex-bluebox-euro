@@ -22,6 +22,10 @@ def bw(at, target):
     b[3] &= ~0x40                   # second halfword 0b10x1 -> 0b10x1 without the link bit (bit 14)
     return bytes(b)
 
+# the settings page's list as patches/usb.py and patches/master.py leave it
+SETTINGS = [0x178, 0x59, 0x118] + list(range(0x1F7, 0x203)) + [0x172, 0x174, 0x18C, 0x175, 0x176, 0x177, 0x170, 0x171,
+            0x18B, 0x116, 0xB5] + list(range(0x130, 0x13C)) + [0x43]
+
 PATCHES = [
     (0x08098000, bytes(len(code7)), code7),
     # M7: reverb vtable 0x0806ada0 slot 3 (hall_process, patches/hall.py) -> sfx_process, which runs the send FX (into
@@ -61,6 +65,14 @@ PATCHES = [
     # FX1 -> DEL, FX2 -> REV
     (0x08149750, b"FX1:\0", b"DEL:\0"),
     (0x08149760, b"FX2:\0", b"REV:\0"),
+    # OUT 1/2 modes. M7: the audio loop's codec writes for OUT1, OUT2 (bl FUN_08056c24, slots 2, 3: the master) ->
+    # sfx_out1, sfx_out2, which write the sends (or the cue) instead when the setting is not Master
+    (0x0804C90E, bl(0x0804C90E, 0x08056C24), bl(0x0804C90E, s7["sfx_out1"])),
+    (0x0804C924, bl(0x0804C924, 0x08056C24), bl(0x0804C924, s7["sfx_out2"])),
+    # M4: the settings page's id list (patches/usb.py, patches/master.py): OUT 1/2 (0x48) after CUE Send (0x174)
+    (0x0814D91C, struct.pack(f"<{len(SETTINGS) + 2}H", *SETTINGS, 0, 0),
+     struct.pack(f"<{len(SETTINGS) + 2}H", *SETTINGS[:SETTINGS.index(0x174) + 1], 0x48,
+                 *SETTINGS[SETTINGS.index(0x174) + 1:], 0)),
 ]
 if os.environ.get("SFX_NO_TRACK_PAGE"):     # a diagnostic build: the sends without the track screen page
     PATCHES = [p for p in PATCHES if p[0] not in (0x08124758, 0x0812474C, 0x08135720, 0x081342D8, 0x081342F4, 0x08134316, 0x08134360)]

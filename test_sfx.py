@@ -82,6 +82,12 @@ check(bl_target(0x08124758) == s4["ts_track_next"] and bl_target(0x0812474C) == 
 check(bl_target(0x08135720) == s4["ts_tp_setup"] and all(bl_target(a) == s4["ts_tp_fill"] for a in (0x081342D8, 0x081342F4, 0x08134316))
       and bl_target(0x08134360) == s4["ts_tp_turn"], "track screen setup, fill (3 calls), encoder turn -> ours")
 check(at(0x081356A8, 4) == stock_at(0x081356A8, 4) and at(0x0812F51C, 4) == stock_at(0x0812F51C, 4), "mixer screen untouched")
+check(bl_target(0x0804C90E) == s7["sfx_out1"] and bl_target(0x0804C924) == s7["sfx_out2"]
+      and all(bl_target(a) == 0x08056C24 for a in (0x0804C8E2, 0x0804C8F8, 0x0804C93A, 0x0804C950)),
+      "codec writes for OUT1, OUT2 (slots 2, 3) -> sfx_out1, sfx_out2; the other four stock")
+SL = struct.unpack("<42H", at(0x0814D91C, 84))
+check(SL[:SL.index(0)] == (0x178, 0x59, 0x118) + tuple(range(0x1F7, 0x203)) + (0x172, 0x174, ids["OUT_MODE"], 0x18C, 0x175, 0x176, 0x177,
+      0x170, 0x171, 0x18B, 0x116, 0xB5) + tuple(range(0x130, 0x13C)) + (0x43,), "settings list: OUT 1/2 after CUE Send, the rest as before")
 
 # ---- M7: allocation at graph build
 HEAP = 0x24000004
@@ -102,7 +108,9 @@ p = u32(uc, 0x38800FA4)
 size = u32(uc, HEAP) - 0xC0010000                  # (with its 32-byte gaps)
 print(f"     state {size} bytes at {p:#x}")
 check(r == 0x24050000 and p == 0xC0010020 and u32(uc, 0x38800FA0) == 0x58464453, "sfx_ctor: runs the delay's constructor, then allocates its state")
-check(0x100000 < size <= 1052912 and u32(uc, p) == 0x58464453 and u32(uc, p + 4) == p, "state no bigger than build 2's (1052912 bytes; 2 MB ran the SDRAM pool out at boot), marked")
+# Build 2's 1052912 bytes booted, 2 MB did not; build 19 on hardware showed the M7 heap top at 0xC3382000 with ours in
+# it, 0x7E000 (504 KB) below the pool's end (0xC3400000, the M4's heap after): a few KB more is safe
+check(0x100000 < size <= 1052912 + 4096 and u32(uc, p) == 0x58464453 and u32(uc, p + 4) == p, "state within a few KB of build 2's (1052912 bytes; 2 MB ran the SDRAM pool out at boot), marked")
 check(bytes(uc.mem_read(p + 0x10, 0x1000)) == bytes(0x1000), "state zeroed (delay lines first)")
 call(uc, s7["sfx_ctor"], 0x24050000)
 check(u32(uc, 0x38800FA4) == p and u32(uc, HEAP) == 0xC0010000 + size, "a rebuilt graph keeps the same memory")
@@ -497,6 +505,55 @@ for _ in range(40): _, _, n, b_ = strip(uc, [0.0] * 32, [0.0] * 32, silent=True)
 print(f"     chorus + drive on, silent track: {n} instructions per block")
 check(n < 300 and strips[-1][1] == IN, "silent track: the inserts idle once their tails are out")
 
+
+# OUT 1/2: the setting (kept in backup SRAM), the per-track sends, the two codec writes
+uc, node = setup()
+pending.clear()
+OBJ, CUEL, CUER, MSL, MSR, D1, D2 = 0x24060000, 0x24060100, 0x24060200, 0x24060300, 0x24060400, 0x24061000, 0x24062000
+cue_l = [0.1 * i / 32 for i in range(32)]; cue_r = [0.3] * 32; mst = [0.25] * 32
+uc.mem_write(OBJ + 0x3C, struct.pack("<4I", CUEL, CUER, MSL, MSR))
+for a, v in ((CUEL, cue_l), (CUER, cue_r), (MSL, mst), (MSR, mst)): uc.mem_write(a, struct.pack("<32f", *v))
+EVM = 0x24070000
+def msg7(pid, val, target=0x15):
+    uc.mem_write(EVM, struct.pack("<B7xIHHiI", 0x39, target, pid, 0, val, 0)); call(uc, s7["sfx_msg"], CTX, EVM)
+fl = lambda v: struct.unpack("<I", struct.pack("<f", v))[0]
+def codec(fn, buf, dst):
+    """the audio loop's codec write (FUN_08056c24(buf, n, dst, 8, gain s0, limit s1)) through ours; r4 the audio object"""
+    uc.reg_write(UC_ARM_REG_R4, OBJ); uc.reg_write(UC_ARM_REG_S0, fl(1.0)); uc.reg_write(UC_ARM_REG_S1, fl(0.9999999))
+    call(uc, fn, buf, 32, dst, 8)
+    return [struct.unpack("<i", uc.mem_read(dst + 32 * i, 4))[0] / 2 ** 31 for i in range(32)]
+def out12_block(l, r, chans=(0,)):
+    for c in chans: strip(uc, l, r, idx=c)
+    return codec(s7["sfx_out1"], MSL, D1), codec(s7["sfx_out2"], MSR, D2)
+close = lambda a, b: all(abs(x - y) < 1e-5 for x, y in zip(a, b))
+sl = [0.5 * math.sin(i / 3) for i in range(32)]; sr = [0.2 * math.cos(i / 5) for i in range(32)]
+o1, o2 = out12_block(sl, sr)
+check(close(o1, mst) and close(o2, mst) and u32(uc, 0x38800FAC) == 0, "OUT 1/2 at Master (never set): the master, as stock")
+msg7(ids["TS_O1"], 1000, 0); msg7(ids["TS_O2"], 500, 0); msg7(ids["TS_O1"], 500, 1)
+msg7(ids["OUT_MODE"], 2, 0xC)
+check(u32(uc, 0x38800FAC) == 0x4F555402, "the setting kept in backup SRAM (with its tag)")
+o1, o2 = out12_block(sl, sr, chans=(0, 1))
+mono = [0.5 * (a + b) for a, b in zip(sl, sr)]
+check(close(o1, [1.5 * m for m in mono]) and close(o2, [0.5 * m for m in mono]),
+      "2 Mono Sends: OUT1 = track 1 x 1000 + track 2 x 500, OUT2 = track 1 x 500, each (L+R)/2 post-fader")
+o1, o2 = codec(s7["sfx_out1"], MSL, D1), codec(s7["sfx_out2"], MSR, D2)
+check(close(o1, [0] * 32) and close(o2, [0] * 32), "a block with no sends: OUT 1/2 silent (not the last block again)")
+msg7(ids["OUT_MODE"], 1, 0xC)
+o1, o2 = out12_block(sl, sr)
+check(close(o1, sl) and close(o2, sr), "Stereo Send: OUT1 = left, OUT2 = right of the OUT1 send (OUT2's send unused)")
+msg7(ids["OUT_MODE"], 3, 0xC)
+o1, o2 = out12_block(sl, sr)
+check(close(o1, mono) and close(o2, [0.5 * (a + b) for a, b in zip(cue_l, cue_r)]), "Send + Cue: OUT1 = the mono send, OUT2 = the cue (mono)")
+# the setting holds through the state being set up again, and when it comes before the graph
+p_ = u32(uc, 0x38800FA4); uc.mem_write(p_ - 32, bytes(size + 64)); block(uc, node, sl, sr)
+check(u32(uc, 0x38800FAC) == 0x4F555403, "setting kept when the state is set up again")
+uc2 = m7(); uc2.mem_write(EVM, struct.pack("<B7xIHHiI", 0x39, 0xC, ids["OUT_MODE"], 0, 2, 0)); stub(uc2, 0x08052444)
+call(uc2, s7["sfx_msg"], CTX, EVM)
+check(u32(uc2, 0x38800FAC) == 0x4F555402, "setting taken before the graph (and our state) exists")
+msg7(ids["OUT_MODE"], 0, 0xC)
+o1, o2 = out12_block(sl, sr)
+check(close(o1, mst) and close(o2, mst), "back to Master: the master again")
+
 # ---- M4: definitions, the reverb set, the list filter, titles and the FX button
 uc = new()
 defs = []
@@ -521,19 +578,20 @@ for r_, v in zip(R, (0x24032000, 0x117, 5, STR)): uc.reg_write(r_, v)
 uc.reg_write(UC_ARM_REG_SP, sp); uc.reg_write(UC_ARM_REG_LR, RET | 1)
 uc.emu_start(s4["dly_defs"] | 1, RET, count=1_000_000)
 ours = {d[0]: d for d in defs if d[0] in ids.values()}
-TS = {ids["TS_CHO"], ids["TS_DRV"], ids["TS_D2"]}
+TS = {ids["TS_CHO"], ids["TS_DRV"], ids["TS_D2"], ids["TS_O1"], ids["TS_O2"], ids["OUT_MODE"]}   # (not the reverb set's)
 check([ours[ids[k]][1:5] for k in ("TS_CHO", "TS_DRV", "TS_D2")] == [(8, "Chorus:", 0, 1000), (8, "Drive:", 0, 1000), (8, "RDEL:", 0, 1000)],
       "M4: per track Chorus and Drive amounts, FX5 (like FX1: type 8, 0..1000)")
 print("     " + ", ".join(f"{d[2]}{d[5]}" for d in ours.values()))
 lists = {d[0]: d for d in ldefs if d[0] in ids.values()}
 print("     lists: " + ", ".join(f"{d[1]}{d[4]} x{d[3]}" for d in lists.values()))
-check(len(ours) == 22 and all(i not in ours for i in (0x48, 0x49, 0x53, 0x56, 0x57)) and ours[ids["D2_CUT"]][1:5] == (8, "Cutoff:", 0, 1000) and ours[ids["D2_FILT"]][1] == 4 and ours[ids["D2_TIME"]][3:5] == (0, 1000) and ours[ids["D2_BEAT"]][1] == 4,
-      "M4: the 22 knobs and toggles defined (per track too; Rev Delay Cutoff, Width, Filt); the old chorus/drive On, Level, FX1/FX2 Send and Rev Delay Tone gone")
+check(len(ours) == 24 and all(i not in ours for i in (0x49, 0x53)) and ours[ids["TS_O1"]][1:6] == (8, "OUT1:", 0, 1000, "out1_send") and ours[ids["TS_O2"]][1:6] == (8, "OUT2:", 0, 1000, "out2_send") and ours[ids["D2_CUT"]][1:5] == (8, "Cutoff:", 0, 1000) and ours[ids["D2_FILT"]][1] == 4 and ours[ids["D2_TIME"]][3:5] == (0, 1000) and ours[ids["D2_BEAT"]][1] == 4,
+      "M4: the 24 knobs and toggles defined (per track too, OUT1/OUT2 sends; Rev Delay Cutoff, Width, Filt); the old chorus/drive On, Level, FX1/FX2 Send and Rev Delay Tone gone")
 names = lambda p, n: [cs(u32(uc, p + 4 * i)) for i in range(n)]
-check(set(lists) == {ids["CHO_MODE"], ids["D2_SYNC"]} and lists[ids["CHO_MODE"]][3] == 3 and names(lists[ids["CHO_MODE"]][2], 3) == ["I", "II", "I+II"]
+check(set(lists) == {ids["CHO_MODE"], ids["D2_SYNC"], ids["OUT_MODE"]} and lists[ids["OUT_MODE"]][1:5:3] == ("OUT 1/2:", "out12mode")
+      and names(lists[ids["OUT_MODE"]][2], 4) == ["Master", "Stereo Send", "2 Mono Sends", "Send + Cue"] and lists[ids["CHO_MODE"]][3] == 3 and names(lists[ids["CHO_MODE"]][2], 3) == ["I", "II", "I+II"]
       and lists[ids["D2_SYNC"]][3] == 12 and names(lists[ids["D2_SYNC"]][2], 12)[::4] == ["1/64", "1/16D", "1/4"],
-      "M4: Mode a list (I, II, I+II), Delay 2's synced Time the stock delay's 12 note values")
-check(len(set(d[5] for d in ours.values()) | set(d[4] for d in lists.values())) == 24, "M4: each with its own key")
+      "M4: Mode a list (I, II, I+II), Delay 2's synced Time the stock delay's 12 note values, OUT 1/2's four modes")
+check(len(set(d[5] for d in ours.values()) | set(d[4] for d in lists.values())) == 27, "M4: each with its own key")
 check(u32(uc, 0x38800FE4) == 0, "M4: boot leaves the FX button at the reverb")
 
 # the reverb set: hall's table, then ours, ending at the common tail with r4, r5 intact
@@ -620,7 +678,7 @@ added.clear()
 h = uc.hook_add(UC_HOOK_CODE, m4_add, begin=0x081205E2, end=0x081205E2)
 call(uc, s4["ts_set_add"], 0x24030000, 0x173, 1)
 uc.hook_del(h)
-check(added == [(0x173, 1)] + [(ids[k], 0) for k in ("TS_CHO", "TS_DRV", "TS_D2")], f"channel set: 0x173, then our three per-track params at 0 ({added})")
+check(added == [(0x173, 1)] + [(ids[k], 0) for k in ("TS_CHO", "TS_DRV", "TS_D2", "TS_O1", "TS_O2")], f"channel set: 0x173, then our five per-track params at 0 ({added})")
 views.clear()
 APP = 0xC0200000
 PG = 0xC0300000                                  # (the screen's owner is not the button handler's app)
@@ -629,7 +687,9 @@ stub(uc, 0x08133884, setups)
 stub(uc, 0x081339B0)
 def getp(uc, a, s, _):
     sl, pid = struct.unpack("<H", uc.mem_read(uc.reg_read(UC_ARM_REG_R1), 2))[0], struct.unpack("<H", uc.mem_read(uc.reg_read(UC_ARM_REG_R2), 2))[0]
-    w32(uc, uc.reg_read(UC_ARM_REG_R3), sl * 100 + pid); uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
+    w32(uc, uc.reg_read(UC_ARM_REG_R3), OUTM[0] if (sl, pid) == (0xC, ids["OUT_MODE"]) else sl * 100 + pid)
+    uc.reg_write(UC_ARM_REG_PC, uc.reg_read(UC_ARM_REG_LR))
+OUTM = [0]                                       # the OUT 1/2 setting, as fw_getp reads it (global set, slot 0xc)
 uc.hook_add(UC_HOOK_CODE, getp, begin=0x08122580, end=0x08122580)
 infos = []
 def info(uc, a, s, _):
@@ -641,7 +701,7 @@ VT, HIDE = 0x20001000, 0x20001100                 # a fake widget vtable: slot 0
 uc.mem_write(VT + 0x2C, struct.pack("<I", HIDE | 1)); uc.mem_write(HIDE, b"\x70\x47")
 stub(uc, HIDE, shown); stub(uc, 0x081288FC)
 for off in (0xC398, 0xC768, 0xCB38, 0xCF08, 0xD2D8, 0xD6A8, 0xDA78, 0xDE48, 0xE814): w32(uc, PG + off, VT)
-OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xE814, 1), (0xDE48, 1)]
+OTHERS = [(0xC398, 1), (0xC768, 1), (0xCB38, 1), (0xD6A8, 1), (0xE814, 1), (0xDE48, 1), (0xDA78, 0), (0xD2D8, 0)]
 stub(uc, 0x08128D9C, turns)
 def press_track():
     """the track button as the dispatcher handles it (our two hooks), then the screen's setup (event 0x8c)"""
@@ -664,7 +724,7 @@ call(uc, s4["ts_tp_setup"], PG, 1)
 check(u32(uc, 0x38800FF4) == 1 and [(r[0] - PG, r[1]) for r in shown] == OTHERS,
       f"our sends' setup: Vol, Pan, Gain, CUE (knob and button), OUT4 hidden ({[(hex(r[0] - PG), r[1]) for r in shown]})")
 shown.clear(); w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_setup"], PG, 1)
-check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], "the stock half shows them all again")
+check([(r[0] - PG, r[1]) for r in shown] == [(o, 0) for o, _ in OTHERS], f"the stock half shows them all again ({shown})")
 w32(uc, PG + 0xEBBC, 1); w32(uc, 0x38800FF4, 1); binds.clear(); shown.clear(); infos.clear()
 w32(uc, 0x24030000, 0); uc.mem_write(0x24030004, struct.pack("<H", 3))
 call(uc, s4["ts_tp_fill"], PG, 0x24030000)
@@ -679,4 +739,24 @@ w32(uc, 0x38800FF4, 1); turns.clear()
 call(uc, s4["ts_tp_turn"], PG + 0xDE48, 1); call(uc, s4["ts_tp_turn"], PG + 0xCF08, 1)
 w32(uc, 0x38800FF4, 0); call(uc, s4["ts_tp_turn"], PG + 0xDE48, 1)
 check([t[0] - PG for t in turns] == [0xCF08, 0xDE48], "encoder 4 (OUT4, our check) does nothing on our sends only")
+
+# OUT sends page: with OUT 1/2 not Master, the track button's next press after the FX sends
+views.clear(); OUTM[0] = 2
+uc.mem_write(APP + 0x73D2, bytes([5, 2])); w32(uc, 0x38800FF4, 0)
+seq = [press_track() for _ in range(5)]
+check(seq == [(6, 1), (6, 3), (0x16, 0), (6, 0), (6, 1)], f"track button, OUT 1/2 not Master: track screen -> FX sends -> OUT sends -> sidechain ({seq})")
+w32(uc, 0x38800FF4, 4); shown.clear(); call(uc, s4["ts_tp_setup"], PG, 1)
+check(u32(uc, 0x38800FF4) == 3 and [(r[0] - PG, r[1]) for r in shown] == OTHERS[:6] + [(0xDA78, 1), (0xD2D8, 0)],
+      f"OUT sends' setup, 2 Mono Sends: OUT3 hidden too, FX2 shown ({[(hex(r[0] - PG), r[1]) for r in shown]})")
+binds.clear(); call(uc, s4["ts_tp_fill"], PG, 0x24030000)
+check([(r[0] - PG, r[1]) for r in binds] == [(0xCF08, ids["TS_O1"]), (0xD2D8, ids["TS_O2"])], "OUT sends' fill, 2 Mono Sends: FX1 knob = OUT1 send, FX2 knob = OUT2 send")
+OUTM[0] = 1; binds.clear(); shown.clear(); call(uc, s4["ts_tp_fill"], PG, 0x24030000)
+check([(r[0] - PG, r[1]) for r in binds] == [(0xCF08, ids["TS_O1"])] and cs(PG + 0xCF08 + 0xF8) == "OUT1/2" and (0xD2D8, 1) in [(r[0] - PG, r[1]) for r in shown],
+      "OUT sends' fill, Stereo Send: one knob, named OUT1/2; FX2 hidden")
+turns.clear()
+for off in (0xCF08, 0xD2D8, 0xDA78, 0xDE48): call(uc, s4["ts_tp_turn"], PG + off, 1)
+check([t_[0] - PG for t_ in turns] == [0xCF08], "OUT sends, one send: only encoder 1 turns anything")
+OUTM[0] = 0; views.clear(); w32(uc, 0x38800FF4, 1)
+uc.mem_write(APP + 0x73D2, bytes([6, 5]))
+check(press_track() == (0x16, 0), "OUT 1/2 at Master: the FX sends go straight on to the sidechain")
 print("all passed")

@@ -86,6 +86,9 @@ struct sfx {
     float bpm;                                                  /* the tempo d2_tgt was worked out for */
     /* per track: chorus and drive amounts (0..1, off at 0), Rev Delay send (0..1) */
     float tc_amt[NCH], td_amt[NCH], ts_d2[NCH];
+    float ts_o1[NCH], ts_o2[NCH];                               /* OUT1, OUT2 sends (0..1) */
+    uint32_t ohas, on;                                          /* o has this block's sends (on frames) */
+    float o[2][MAXN];                                           /* OUT1, OUT2 this block (OUT 1/2 not Master) */
     int8_t slot_of[NCH];                                        /* the track's slot, -1 none */
     uint32_t act;                                               /* the Rev Delay runs, so it wants input */
     uint32_t has;                                               /* it has input this block */
@@ -110,8 +113,17 @@ struct sfx {
 };
 #define SFX_MAGIC 0x58464453u       /* "SDFX" */
 
-struct sfx_ptr { uint32_t magic; struct sfx *s; uint32_t fixes; };
+struct sfx_ptr { uint32_t magic; struct sfx *s; uint32_t fixes, omode; };
 #define SP ((volatile struct sfx_ptr *)0x38800fa0u)   /* own 32-byte line, M7 only */
+/* The OUT 1/2 setting: kept here, not in the state, so it holds whenever it arrives (the settings may come before
+ * the graph, and the state can be set up again) */
+#define OMODE_TAG 0x4f555400u       /* "\0TUO" + the mode */
+static uint32_t omode(void)
+{
+    bkp_enable();
+    uint32_t v = SP->omode;
+    return (v & ~3u) == OMODE_TAG ? v & 3u : 0;
+}
 
 /* What the M7 has seen since boot, for the M4 to show on the track sends page (src/dly_m4.c): a check on hardware */
 struct sfx_seen { uint32_t magic, bits; uint16_t last_ch, last_id; uint32_t why, addr, top, fixes; };
@@ -365,7 +377,13 @@ static int set(struct sfx *s, unsigned id, int32_t v)
 /* the per-track ones (each channel's set, the channel as target) */
 static int is_ts(unsigned id)
 {
-    return id >= SFX_TS_CHO && id <= SFX_TS_D2;
+    return (id >= SFX_TS_CHO && id <= SFX_TS_D2) || id == SFX_TS_O1 || id == SFX_TS_O2;
+}
+static void set_omode(int32_t v)
+{
+    bkp_enable();
+    PWR_CR1 |= 1u << 8;
+    SP->omode = OMODE_TAG | (v < 0 ? 0u : v > 3 ? 3u : (uint32_t)v);
 }
 static void set_ts(struct sfx *s, unsigned id, unsigned ch, int32_t v)
 {
@@ -376,6 +394,8 @@ static void set_ts(struct sfx *s, unsigned id, unsigned ch, int32_t v)
     case SFX_TS_CHO: s->tc_amt[ch] = a; break;
     case SFX_TS_DRV: s->td_amt[ch] = a; break;
     case SFX_TS_D2: s->ts_d2[ch] = a; break;
+    case SFX_TS_O1: s->ts_o1[ch] = a; break;
+    case SFX_TS_O2: s->ts_o2[ch] = a; break;
     }
 }
 
@@ -656,6 +676,10 @@ void sfx_msg(void *ctx, struct fw_ev *ev)
 {
     if (ev->type == 0x39 && ev->id >= SFX_D2_CUT && ev->id <= SFX_D2_DRIFT)   /* (our ids' range) */
         seen(SEEN_MSG, ev->target, ev->id);
+    if (ev->type == 0x39 && ev->id == SFX_OUT_MODE) {
+        set_omode(ev->value);
+        return;
+    }
     if (ev->type == 0x39) {
         struct sfx *s = state();
         if (s) {
@@ -688,7 +712,9 @@ unsigned sfx_process(void *obj, void *ctx)
     for (unsigned i = 0; fw_next_ev(q, i, &ev); i++)
         if (ev.type == 0x39) {
             int ours = 1;
-            if (is_ts(ev.id))
+            if (ev.id == SFX_OUT_MODE)
+                set_omode(ev.value);
+            else if (is_ts(ev.id))
                 set_ts(s, ev.id, ev.target, ev.value);
             else if (set(s, ev.id, ev.value))
                 changed = 1;
@@ -774,20 +800,95 @@ void sfx_strip(void *mixer, void *in, unsigned idx, float *ch, void *mainb, void
         }
     }
     fw_strip(mixer, in, idx, ch, mainb, ctx);
-    if (!s->act)
-        return;
-    float g = s->ts_d2[idx];
-    if (g <= 0.f)
-        return;
     struct bus *b = (struct bus *)((uint8_t *)ch + 20);
     if (b->silent || !b->l)
         return;
     unsigned n = b->frames > MAXN ? MAXN : b->frames;
     const float *l = b->l, *r = b->stereo && b->r ? b->r : b->l;
-    float *il = s->in[0], *ir = s->in[1];
-    if (s->has)
-        for (unsigned i = 0; i < n; i++) { il[i] += g * l[i]; ir[i] += g * r[i]; }
+    float g = s->act ? s->ts_d2[idx] : 0.f;
+    if (g > 0.f) {
+        float *il = s->in[0], *ir = s->in[1];
+        if (s->has)
+            for (unsigned i = 0; i < n; i++) { il[i] += g * l[i]; ir[i] += g * r[i]; }
+        else
+            for (unsigned i = 0; i < n; i++) { il[i] = g * l[i]; ir[i] = g * r[i]; }
+        s->has = 1;
+    }
+    /* OUT 1/2 as sends: Stereo, OUT1 = left and OUT2 = right of the send; otherwise each a mono send (L+R)/2 */
+    uint32_t om = omode();
+    if (!om)
+        return;
+    float g1 = s->ts_o1[idx], g2 = om == 2 ? s->ts_o2[idx] : 0.f;
+    if (g1 <= 0.f && g2 <= 0.f)
+        return;
+    float *o1 = s->o[0], *o2 = s->o[1];
+    if (!s->ohas) {
+        for (unsigned i = 0; i < MAXN; i++)
+            o1[i] = o2[i] = 0.f;
+        s->ohas = 1;
+    }
+    if (n > s->on) s->on = n;
+    if (om == 1)
+        for (unsigned i = 0; i < n; i++) { o1[i] += g1 * l[i]; o2[i] += g1 * r[i]; }
     else
-        for (unsigned i = 0; i < n; i++) { il[i] = g * l[i]; ir[i] = g * r[i]; }
-    s->has = 1;
+        for (unsigned i = 0; i < n; i++) {
+            float m = 0.5f * (l[i] + r[i]);
+            o1[i] += g1 * m;
+            o2[i] += g2 * m;
+        }
+}
+
+/*
+ * OUT 1/2: the audio loop FUN_0804c778 writes its six output buffers (filled by FUN_08052810 from buses 15 (cue),
+ * 12 (master), 16, 17) into the codec's TDM slots with FUN_08056c24(buf, n, dst, 8, gain, limit); slots 2 and 3 are
+ * OUT1 and OUT2, the master. With OUT 1/2 not Master, these two writes get the sends instead (Send + Cue: OUT2 the
+ * cue, mono, from the buffer the phones slots 0, 1 just got). USB and recording read the buffers, which stay the
+ * master. sfx_out1/sfx_out2 replace bl FUN_08056c24 @0x0804c90e/@0x0804c924; r4 is the audio object there.
+ */
+typedef void (*codec_fn)(const float *buf, int n, int32_t *dst, unsigned stride, float gain, float limit);
+#define fw_codec ((codec_fn)FN(0x08056c24))
+static void out12(unsigned which, const float *buf, int n, int32_t *dst, const uint8_t *obj, float gain, float limit)
+{
+    uint32_t om = omode();
+    struct sfx *s = om ? state() : 0;
+    if (!s || n <= 0 || n > (int)MAXN) {
+        fw_codec(buf, n, dst, 8, gain, limit);
+        return;
+    }
+    float t[MAXN];
+    if (which == 1 && om == 3) {
+        const float *cl = *(float *const *)(obj + 0x3c), *cr = *(float *const *)(obj + 0x40);
+        for (int i = 0; i < n; i++)
+            t[i] = 0.5f * (cl[i] + cr[i]);
+    } else if (s->ohas) {
+        const float *o = s->o[which];
+        for (int i = 0; i < n; i++)
+            t[i] = (unsigned)i < s->on ? o[i] : 0.f;
+    } else
+        for (int i = 0; i < n; i++)
+            t[i] = 0.f;
+    fw_codec(t, n, dst, 8, gain, limit);
+    if (which == 1) {                   /* the block's last: next block's sends start afresh */
+        s->ohas = 0;
+        s->on = 0;
+    }
+}
+void sfx_out1_c(const float *buf, int n, int32_t *dst, const uint8_t *obj, float gain, float limit)
+{
+    out12(0, buf, n, dst, obj, gain, limit);
+}
+void sfx_out2_c(const float *buf, int n, int32_t *dst, const uint8_t *obj, float gain, float limit)
+{
+    out12(1, buf, n, dst, obj, gain, limit);
+}
+/* (stride is always 8 at these calls: r3 carries the audio object instead; s0, s1 pass through) */
+__attribute__((naked)) void sfx_out1(void)
+{
+    __asm volatile("mov r3, r4\n"
+                   "b sfx_out1_c\n");
+}
+__attribute__((naked)) void sfx_out2(void)
+{
+    __asm volatile("mov r3, r4\n"
+                   "b sfx_out2_c\n");
 }

@@ -17,6 +17,7 @@ typedef void (*def_list_fn)(void *table, unsigned id, const char *label, const c
 #define fw_def_list ((def_list_fn)0x08135db5)
 static const char *const usb_out_names[2] = { "Multichannel", "Master only" };
 static const char *const cho_mode_names[3] = { "I", "II", "I+II" };
+static const char *const out_mode_names[4] = { "Master", "Stereo Send", "2 Mono Sends", "Send + Cue" };
 #define SYNC_NAMES ((const char *const *)0x0814ea24)    /* the stock delay's 0x34 list: 1/64 .. 1 bar (12) */
 #include "sfx_ids.h"
 static void sfx_reset(void);
@@ -56,6 +57,10 @@ void dly_defs(void *table, unsigned id, unsigned type, const char *label, int mi
     fw_def(table, SFX_TS_CHO, KNOB, "Chorus:", 0, 1000, "chorus_amount");
     fw_def(table, SFX_TS_DRV, KNOB, "Drive:", 0, 1000, "drive_amount");
     fw_def(table, SFX_TS_D2, KNOB, "RDEL:", 0, 1000, "delay2_send");
+    /* OUT 1/2 (src/sfx_m7.c): the setting, and per track the sends to them */
+    fw_def_list(table, SFX_OUT_MODE, "OUT 1/2:", out_mode_names, 4, "out12mode");
+    fw_def(table, SFX_TS_O1, KNOB, "OUT1:", 0, 1000, "out1_send");
+    fw_def(table, SFX_TS_O2, KNOB, "OUT2:", 0, 1000, "out2_send");
     sfx_reset();                    /* at boot the FX button starts from the reverb itself */
 }
 
@@ -69,6 +74,7 @@ void mst_set_add(void *set, unsigned id, int value)
     fw_add(set, id, value);
     fw_add(set, 0x43, 0);
     fw_add(set, 0x59, 0);           /* USB Out: Multichannel */
+    fw_add(set, SFX_OUT_MODE, 0);   /* OUT 1/2: Master (patches/sfx.py puts it on the settings page) */
 }
 
 /*
@@ -144,7 +150,7 @@ struct sfx_ui {
     uint32_t mode;                  /* the FX button: 0 reverb, 1 chorus, 2 drive, 3 delay 2 */
     uint32_t tpage;                 /* the track screen's page (seen by ts_tp_setup) */
     uint16_t _rows[4];              /* (unused) */
-    uint32_t page3;                 /* the track screen shows our sends (between it and the sidechain screen) */
+    uint32_t page3;                 /* the track screen shows our sends: 1 FX sends, 3 OUT sends; 2, 4 asked for */
 };
 #define SU ((volatile struct sfx_ui *)0x38800fe0u)    /* own 32-byte line, M4 only */
 #define SU_MAGIC 0x49555846u
@@ -287,17 +293,24 @@ void ts_set_add(void *set, unsigned id, int value)    /* the channel set's last 
     fw_add(set, SFX_TS_CHO, 0);
     fw_add(set, SFX_TS_DRV, 0);
     fw_add(set, SFX_TS_D2, 0);
+    fw_add(set, SFX_TS_O1, 0);
+    fw_add(set, SFX_TS_O2, 0);
 }
 
-static uint32_t ts_on(void)
+static uint32_t ts_page(void)       /* 0, or which of ours: 1 FX sends, 3 OUT sends (2, 4: asked for) */
 {
     su_mode();                      /* backup SRAM on */
-    return SU->magic == SU_MAGIC && SU->page3 == 1;
+    return SU->magic == SU_MAGIC && SU->page3 <= 4 ? SU->page3 : 0;
+}
+static uint32_t ts_on(void)         /* either of our pages shows */
+{
+    uint32_t p = ts_page();
+    return p == 1 || p == 3;
 }
 static uint32_t ts_armed(void)
 {
-    su_mode();
-    return SU->magic == SU_MAGIC && SU->page3 == 2;
+    uint32_t p = ts_page();
+    return p == 2 || p == 4 ? p : 0;
 }
 static void ts_set(uint32_t on)
 {
@@ -310,9 +323,14 @@ static void ts_set(uint32_t on)
 
 /* the track button (button 1): from the track screen (views 5, 6) to the sidechain screen (@0x08124758), from
  * anywhere else back to the track screen (@0x0812474c, its last half) */
+static uint32_t out_mode(void);
 void ts_track_next(void *app, unsigned view, int a, int b)
 {
-    if (ts_on()) {
+    uint32_t p = ts_page();
+    if (p == 1 && out_mode()) {
+        ts_set(4);                  /* from the FX sends to the OUT sends (OUT 1/2 not Master) */
+        fw_view(app, 6, a, b);
+    } else if (p == 1 || p == 3) {
         ts_set(0);
         fw_view(app, view, a, b);   /* from our sends on to the sidechain screen */
     } else {
@@ -359,12 +377,32 @@ static void ts_vis(void *page, unsigned off, int hide)
     uint8_t *w = TP_KNOB(page, off);
     ((void (*)(void *, int))(*(uint32_t **)w)[0x2c / 4])(w, hide);
 }
-/* on our sends Vol, Pan, Gain, CUE (knob and button) and OUT4 are hidden */
-static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_CUE_BTN, TP_OUT4 };
-static void ts_hide(void *page, int hide)
+/* The OUT 1/2 setting (0 Master, 1 Stereo Send, 2 2 Mono Sends, 3 Send + Cue), from the global set (slot 0xc) */
+static uint32_t out_mode(void)
 {
+    uint16_t sl = 0xc, pid = SFX_OUT_MODE;
+    int v = 0;
+    fw_getp(FW_STATE, &sl, &pid, &v);
+    return v > 0 && v <= 3 ? (uint32_t)v : 0;
+}
+/* on our sends Vol, Pan, Gain, CUE (knob and button) and OUT4 are hidden; on the OUT sends OUT3 too, and FX2 when
+ * only one send is used (all but 2 Mono Sends) */
+static const uint16_t TP_OTHERS[] = { 0xc398, 0xc768, 0xcb38, TP_CUE, TP_CUE_BTN, TP_OUT4 };
+static int ts_hidden(unsigned off, uint32_t p)  /* hidden on our page p (1 or 3) */
+{
+    if (p == 1)
+        return off == TP_OUT4;
+    if (p == 3)
+        return off == TP_OUT4 || off == TP_OUT3 || (off == TP_FX2 && out_mode() != 2);
+    return 0;
+}
+static void ts_hide(void *page, uint32_t p)
+{
+    int on = p == 1 || p == 3;
     for (unsigned i = 0; i < sizeof TP_OTHERS / sizeof TP_OTHERS[0]; i++)
-        ts_vis(page, TP_OTHERS[i], hide);
+        ts_vis(page, TP_OTHERS[i], on);
+    ts_vis(page, TP_OUT3, ts_hidden(TP_OUT3, p));
+    ts_vis(page, TP_FX2, ts_hidden(TP_FX2, p));
 }
 
 /* bl FUN_08133884 @0x08135720 (event 0x8c: the track screen shown, sub = its half): the first half ends our sends */
@@ -373,10 +411,10 @@ void ts_tp_setup(void *page, int sub, int a, int b)
     /* our sends only when ts_track_next asked for them (armed, 2); any other showing is the stock half. (The view
      * switch only queues event 0x8c, so this runs after it.) */
     uint32_t armed = ts_armed();
-    ts_set(sub == 1 && armed);
+    ts_set(sub == 1 && armed ? armed - 1 : 0);
     SU->tpage = (uint32_t)page;
     fw_tp_setup(page, sub, a, b);
-    ts_hide(page, sub == 1 && ts_on());     /* (the stock halves show them all again) */
+    ts_hide(page, sub == 1 ? ts_page() : 0);   /* (the stock halves show them all again) */
 }
 
 static void bind(void *page, unsigned off, uint16_t slot, unsigned id)
@@ -401,10 +439,25 @@ void ts_tp_fill(void *page, void *arg)
 {
     fw_tp_fill(page, arg);
     uint16_t slot = *(uint16_t *)((uint8_t *)arg + 4);
+    uint32_t p = ts_page();
     if (TP_SUB(page) != 1 || !ts_on())
         return;
     if (slot >= 12)
         return;
+    if (p == 3) {                   /* the OUT sends */
+        uint32_t m = out_mode();
+        bind(page, TP_FX1, slot, SFX_TS_O1);
+        if (m == 2)
+            bind(page, TP_FX2, slot, SFX_TS_O2);
+        if (m == 1) {               /* one stereo send to both: its name says so */
+            char *name = (char *)TP_KNOB(page, TP_FX1) + 0xf8;
+            name[0] = 'O'; name[1] = 'U'; name[2] = 'T'; name[3] = '1'; name[4] = '/'; name[5] = '2'; name[6] = 0;
+            TP_KNOB(page, TP_FX1)[0x1f7] = 0;
+            fw_knob_name(TP_KNOB(page, TP_FX1), 1);
+        }
+        ts_hide(page, 3);
+        return;
+    }
     bind(page, TP_FX1, slot, SFX_TS_CHO);       /* Chorus amount */
     bind(page, TP_FX2, slot, SFX_TS_DRV);       /* Drive amount */
     bind(page, TP_OUT3, slot, SFX_TS_D2);
@@ -419,7 +472,10 @@ void ts_tp_fill(void *page, void *arg)
 /* bl FUN_08128d9c @0x08134360 (an encoder turned on the track screen): the fourth does nothing on our sends */
 void ts_tp_turn(uint8_t *w, int delta)
 {
-    if (ts_on() && SU->tpage && w == TP_KNOB(SU->tpage, TP_OUT4))
-        return;
+    uint32_t p = ts_page();
+    if ((p == 1 || p == 3) && SU->tpage)
+        for (unsigned off = TP_FX1; off <= TP_OUT4; off += 0x3d0)   /* (FX1, FX2, CUE, OUT3, OUT4) */
+            if (w == TP_KNOB(SU->tpage, off) && ts_hidden(off, p))
+                return;
     fw_turn(w, delta);
 }

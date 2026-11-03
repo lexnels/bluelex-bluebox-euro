@@ -3,7 +3,7 @@
  * the M4 sends them with slot 0x15; src/sfx_m7.c takes them before the M7's dispatcher (the stock reverb setter would
  * ignore ids outside 0x13d..0x15c anyway). 0x44, 0x45, 0x47, 0x48, 0x49, 0x56, 0x57 were the chorus's and drive's
  * On, Level and FX1/FX2 Send while they were send FX (builds up to 14); 0x44, 0x45, 0x47 are the Rev Delay's filter
- * now (keys of their own). 0x53 was its Tone (builds up to 22): not used now. */
+ * now, 0x48, 0x56, 0x57 OUT 1/2's (keys of their own). 0x53 was its Tone (builds up to 22), 0x49: not used now. */
 #define SFX_CHO_MODE  0x46          /* a list: 0 = I, 1 = II, 2 = I+II */
 #define SFX_DRV_DRIVE 0x4c
 #define SFX_DRV_TONE  0x4d
@@ -29,4 +29,8 @@
 #define SFX_TS_D2     0x60
 #define SFX_D2_REV    0x62          /* the chance (0..1000 = 0..100 %) that a repeat plays backwards */
 #define SFX_D2_DRIFT  0x64          /* tape drift, as the FX1 delay's (0x3a): a wobbling, wandering extra delay up to 16 ms */
+/* OUT 1/2 (src/sfx_m7.c sfx_out1/sfx_out2): a setting (global set) and two per-track post-fader sends */
+#define SFX_OUT_MODE  0x48          /* a list: 0 = Master (stock), 1 = Stereo Send, 2 = 2 Mono Sends, 3 = Send + Cue */
+#define SFX_TS_O1     0x56          /* per track: OUT1 send (stereo: OUT1/2 as L/R) */
+#define SFX_TS_O2     0x57          /* per track: OUT2 send (2 Mono Sends only) */
 #define SFX_CHO_WIDTH 0x61          /* stereo width of its output: 0 = mono, 500 = as the Juno (opposite LFOs), 1000 = x2 */
