@@ -104,9 +104,9 @@ uc.emu_start(0x08120C1C | 1, M4TAIL, count=1000)
 uc.hook_del(h)
 check(uc.reg_read(UC_ARM_REG_PC) == M4TAIL and uc.reg_read(UC_ARM_REG_R4) == SET and uc.reg_read(UC_ARM_REG_R5) == 0x1234
       and uc.reg_read(UC_ARM_REG_SP) == 0x2407F000, "M4 reverb list: reaches the common tail with r4, r5, sp intact")
-check([(i, v) for _, i, v in added] == [(0x155, 0), (0x159, 1000), (0x15A, 1000), (0x13E, 800), (0x146, 0), (0x143, 500),
+check([(i, v) for _, i, v in added][:10] == [(0x155, 0), (0x159, 1000), (0x15A, 1000), (0x13E, 800), (0x146, 0), (0x143, 500),
       (0x13D, 475), (0x14A, 0), (0x148, 1000), (0x14F, 0)] and all(o == SET for o, _, _ in added),
-      "M4 reverb list: Style, Time, Level, Diffusion, Spread, Size, Pre Delay, Low Cut, HI C, Freeze")
+      "M4 reverb list: Style, Time, Level, Diffusion, Spread, Size, Pre Delay, Low Cut, HI C, Freeze (then the send FX's, if patched)")
 pages = (data[file_off(0x0812BFFA)], data[file_off(0x0812BFAE)], data[file_off(0x0812C0F8)])
 check(pages == (3, 2, 2) or pages == (4, 3, 3),      # with the delay patchset: 4, and dly_page wraps after the last widget
       "M4 reverb panel: a third encoder page (Freeze, fifth column)")
@@ -129,7 +129,7 @@ r, _, _ = block([0.0] * N, [0.0] * N)
 check(calls["process"] == 1 and r == 1, "stock style: hall_process runs the stock engine")
 # the delay's Send to Reverb (src/dly_m7.h): last block's kept wet signal is added to the reverb's bus first
 DS, STASH_N = 0x38800D00, 56             # struct dly_shared: magic, obj, 4 ints, 5 floats, 2 u32, send_g, then stash_n
-uc.mem_write(DS, struct.pack("<I", 0x44454C5B)); uc.mem_write(DS + STASH_N, struct.pack("<I", N))
+uc.mem_write(DS, struct.pack("<I", 0x44454C5C)); uc.mem_write(DS + STASH_N, struct.pack("<I", N))
 uc.mem_write(DS + STASH_N + 4, struct.pack(f"<{N}f", *[0.25] * N) + struct.pack(f"<{N}f", *[-0.5] * N))
 _, l, rr = block([0.1] * N, [0.1] * N)
 check(all(abs(x - 0.35) < 1e-6 for x in l) and all(abs(x + 0.4) < 1e-6 for x in rr) and rd(uc, DS + STASH_N, "<I")[0] == 0,

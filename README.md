@@ -172,7 +172,7 @@ Filt is on, feeds it back into its lines and copies it to its bus. `src/dly_m7.h
   unknown ids), runs the stock body, then keeps Send x the wet output.
 - `dly_read` (all nine line reads, `FUN_08059d54`: the output reads plus the in-loop reads of PING and QUAD+PING)
   keeps the stock read and its glide after a time change, then re-reads the same line a variable amount further
-  back: Drift, while the line is steady, a 0.6 Hz wobble plus a slow random wander (up to 2 x 8 ms); Pitch, a
+  back: Drift, a 0.6 Hz wobble plus a slow random wander (up to 2 x 8 ms); Pitch, a
   read that slides at the pitch ratio and jumps back every delay time (at most 4800 samples) with a 240-sample
   crossfade. Each line read shifts once; in PING mode line C (2T, carrying the right side) shifts twice, since one
   pass through it spans two of the left side's.
